@@ -11,3 +11,5 @@ public-backups/
 # `wrangler dev` has the directory on a fresh clone.
 public/*
 !public/.gitkeep
+
+.r2-synced.json
