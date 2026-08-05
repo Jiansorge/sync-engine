@@ -1,0 +1,39 @@
+name: uptime
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health
+        id: health
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://joining-palms.app/health)
+          body=$(curl -s --max-time 15 https://joining-palms.app/health)
+          echo "status=$code body=$body"
+          ok="no"
+          if [ "$code" = "200" ] && echo "$body" | grep -q '"ok":true'; then ok="yes"; fi
+          echo "ok=$ok"
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Open issue if down (deduped)
+        if: steps.health.outputs.ok == 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          exists=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label uptime --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -z "$exists" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Uptime: joining-palms.app health check failing" \
+              --label uptime \
+              --body "The /health check on https://joining-palms.app failed at $(date -u). Check: /health, /stats, wrangler tail, DO status."
+          else
+            echo "open issue #$exists already exists"
+          fi
