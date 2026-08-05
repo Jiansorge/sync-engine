@@ -64,6 +64,12 @@ PROTOCOL_VERSION = 3
 # Deployable origins for the WS upgrade (same-origin default covers these anyway).
 ALLOWED_ORIGINS = "https://joining-palms.app,https://www.joining-palms.app,https://joining-palms.prayer-earth.workers.dev"
 
+# Deter socket-churn abuse (botnets inflating people/feed + DO CPU): max new
+# WS upgrades per hashed peer IP per window. Raw IPs are never stored — only a
+# SHA-256 hash keys the throttle.
+MAX_UPGRADES_PER_IP = 10
+UPGRADE_WINDOW_MS = 60000
+
 # --- deployable configuration (defaults live in src/worker.js) ---
 # Origin allow-list for WS upgrades (comma-separated origins). Unset/empty
 # allows any origin — fine for local dev, set this in production:
