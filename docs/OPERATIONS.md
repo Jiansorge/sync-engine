@@ -64,6 +64,27 @@ it until audio is served from R2. Set up alerts so you know before you're near:
 
 The dashboard also shows per-Worker request graphs under **Analytics → Workers**.
 
+## Tuning & optimizations
+
+- **Presence cadence is the #1 cost lever at scale.** The app sends `presence`
+  every 5 s while open; each is a DO message (billed 20:1, so ~4/s per user →
+  1 billed request/5 s/user). At large concurrent-user counts this dominates the
+  DO bill. Raising the cadence to 15–30 s (prayer-earth `client.js` `PING_MS`)
+  cuts it 3–6× with a minor freshness tradeoff — the engine broadcasts on change
+  regardless, so the world still updates live.
+- **R2 makes deploys fast.** The app bundle (incl. ~3.5k audio files) is staged
+  into `public/` on every deploy (~30 s, ~7,200 files). Enabling R2 moves audio
+  to the bucket, shrinking deploys to ~5 s and the Worker upload to the app
+  shell + engine. It is NOT required for cost (static assets are free) — it is
+  a deploy-speed/size win.
+- **Audio caching**: files serve with `max-age=0, must-revalidate` (correct when
+  you replace a recording in place). If you want longer caching, version audio
+  filenames (content hash) and add immutable cache headers — only worth it at
+  high play volume.
+- **Monitoring covers degradation**: the uptime Action checks both `/health`
+  and `/stats` `errors`, so a shard that stops answering raises an issue, not
+  just a hard outage.
+
 ## Debugging
 
 - Local: `npm run dev -- --port 8790` then `npm run smoke ws://localhost:8790`.

@@ -12,28 +12,41 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping /health
+      - name: Check /health and /stats
         id: health
         run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://joining-palms.app/health)
-          body=$(curl -s --max-time 15 https://joining-palms.app/health)
-          echo "status=$code body=$body"
+          health_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://joining-palms.app/health)
+          health_body=$(curl -s --max-time 15 https://joining-palms.app/health)
+          stats_body=$(curl -s --max-time 15 https://joining-palms.app/stats)
           ok="no"
-          if [ "$code" = "200" ] && echo "$body" | grep -q '"ok":true'; then ok="yes"; fi
+          detail="health returned $health_code"
+          if [ "$health_code" = "200" ] && echo "$health_body" | grep -q '"ok":true'; then
+            ok="yes"
+            detail=""
+          fi
+          # Also flag degraded state: a shard failing to answer in /stats.
+          errors=$(echo "$stats_body" | sed -n 's/.*"errors":\([0-9][0-9]*\).*/\1/p')
+          if [ "$ok" = "yes" ] && [ -n "$errors" ] && [ "$errors" != "0" ]; then
+            ok="no"
+            detail="stats errors=$errors"
+          fi
           echo "ok=$ok"
+          echo "detail=$detail"
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          echo "detail=$detail" >> "$GITHUB_OUTPUT"
 
-      - name: Open issue if down (deduped)
+      - name: Open issue if down or degraded (deduped)
         if: steps.health.outputs.ok == 'no'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          detail="${{ steps.health.outputs.detail }}"
           exists=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label uptime --json number -q '.[0].number' 2>/dev/null || true)
           if [ -z "$exists" ]; then
             gh issue create --repo "$GITHUB_REPOSITORY" \
               --title "Uptime: joining-palms.app health check failing" \
               --label uptime \
-              --body "The /health check on https://joining-palms.app failed at $(date -u). Check: /health, /stats, wrangler tail, DO status."
+              --body "Check failed at $(date -u): $detail. Investigate: /health, /stats, wrangler tail, DO status."
           else
             echo "open issue #$exists already exists"
           fi
