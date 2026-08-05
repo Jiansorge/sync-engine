@@ -433,3 +433,10 @@ Honest reviews, kept current. **Bold** = still open before v1 is "done."
    documented; `npm run dev/deploy/smoke` + `[assets]`/`new_sqlite_classes`
    wired in `wrangler.toml`. Prayer Earth deploy behind a feature flag is left
    to the app team (only the byte-identical `protocol.js` is copied over).
+
+## License
+
+**AGPL-3.0** — free for everyone to use, modify, and host. Because it is
+copyleft and network-copyleft, anyone who serves a modified version or ships it
+as part of a product must make their changes available under the same license,
+so it can never be locked up or sold as a closed product. See [`LICENSE`](LICENSE).

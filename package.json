@@ -3,7 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "description": "A privacy-first real-time sync layer (WebSockets + presence + broadcast + durable state) for Cloudflare Workers + Durable Objects. Shared across apps.",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
+  "keywords": [
+    "cloudflare-workers",
+    "durable-objects",
+    "websocket",
+    "presence",
+    "realtime",
+    "privacy",
+    "broadcast"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jiansorge/sync-engine.git"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
@@ -19,7 +33,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.1",
     "vitest": "^4.1.10",
-    "wrangler": "^4.118.0"
+    "wrangler": "^4.119.0"
   },
   "overrides": {
     "undici": "^7.29.0"
