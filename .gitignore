@@ -1,9 +1,13 @@
 node_modules/
 .wrangler/
 dist/
-public/assets/
 public-backups/
 *.log
 .DS_Store
 
-public/audio/
+# public/ is a generated deploy target: `npm run deploy:app` stages the Prayer
+# Earth build here (and backs the old one up to public-backups/). It is NOT
+# engine source — keep the repo purely engine code. Only .gitkeep is tracked so
+# `wrangler dev` has the directory on a fresh clone.
+public/*
+!public/.gitkeep
