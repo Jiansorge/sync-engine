@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#07150d" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Joining Palms" />
+    <meta name="application-name" content="Joining Palms" />
+    <meta
+      name="description"
+      content="Pray together with the whole world. Choose a sacred prayer from fifteen faiths and traditions, in twelve languages — and watch the Earth glow as the world prays."
+    />
+    <meta name="robots" content="index, follow" />
+    <title>Joining Palms — Pray With the World</title>
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Joining Palms" />
+    <meta property="og:locale" content="en" />
+    <meta property="og:title" content="Joining Palms — Pray With the World" />
+    <meta
+      property="og:description"
+      content="Choose a sacred prayer from fifteen traditions and pray together with the world. Watch the Earth glow as prayer spreads."
+    />
+    <meta property="og:image" content="/icons/og-card.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Joining Palms — a glowing globe lit by the world's prayers" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Joining Palms — Pray With the World" />
+    <meta
+      name="twitter:description"
+      content="Choose a sacred prayer from fifteen traditions and pray together with the world."
+    />
+    <meta name="twitter:image" content="/icons/og-card.png" />
+
+    <!-- Structured data -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "Joining Palms",
+        "applicationCategory": "LifestyleApplication",
+        "description": "Pray together with the whole world — sacred prayers from fifteen faiths and traditions in twelve languages.",
+        "inLanguage": ["en", "es", "fr", "de", "hi", "pt", "it", "ru", "zh", "ar", "ja", "ko"],
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript and WebGL for the 3D Earth"
+      }
+    </script>
+
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <script>
+      // Fill in the canonical/OG URLs once the deployed origin is known.
+      try {
+        const origin = window.location.origin
+        const link = document.createElement('link')
+        link.rel = 'canonical'
+        link.href = origin + '/'
+        document.head.appendChild(link)
+        for (const prop of ['og:url']) {
+          const m = document.createElement('meta')
+          m.setAttribute('property', prop)
+          m.setAttribute('content', origin + '/')
+          document.head.appendChild(m)
+        }
+      } catch {}
+    </script>
+    <script type="module" crossorigin src="/assets/index-CbayS-O4.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CpamjqNG.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

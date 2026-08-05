@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+dist/
+public/assets/
+public-backups/
+*.log
+.DS_Store
+
+public/audio/

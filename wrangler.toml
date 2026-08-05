@@ -1,0 +1,105 @@
+name = "joining-palms"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+# Custom domain for the app + socket (attached automatically on `wrangler deploy`).
+# Requires the zone (joining-palms.app) to be active on this Cloudflare account.
+[[routes]]
+pattern = "joining-palms.app"
+custom_domain = true
+
+# Durable Objects that hold the live world.
+#   SyncRoom   — one shard of the world (v1: a single shard named 'world').
+#   Coordinator— aggregates all-time totals / users* across shards for /stats.
+[durable_objects]
+bindings = [
+  { name = "SYNC_ROOM", class_name = "SyncRoom" },
+  { name = "COORDINATOR", class_name = "Coordinator" }
+]
+
+# SQLite-backed DOs: durable storage + PITR, survives every redeploy.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SyncRoom", "Coordinator"]
+
+# Static app assets (HTML/JS/CSS/audio) — served by this Worker via env.ASSETS.
+# run_worker_first keeps WebSocket upgrades flowing into the Worker instead of
+# being answered by the asset handler (the WS handshake is a GET /); it requires
+# the explicit binding name so `env.ASSETS.fetch` resolves.
+# All static files (JS/CSS/audio/images/fonts) are served DIRECTLY as assets —
+# free and unlimited, never invoking the Worker — so only the page load + the
+# WebSocket + /health|/stats count against the request quota.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[assets.rules]]
+globs = ["**/*.js", "**/*.css", "**/*.mp3", "**/*.json", "**/*.svg", "**/*.png", "**/*.jpg", "**/*.ico", "**/*.woff2", "**/*.webmanifest", "**/sw.js"]
+run = "assets"
+
+# Optional disaster-recovery KV. When bound, each SyncRoom mirrors its lifetime
+# totals (prayer/spirit counts + seconds — anonymous aggregates only) to this KV
+# every ~6h, so the world's lifetime counts can be restored if DO storage is
+# ever lost. Create a KV namespace and add its id here to enable:
+# [[kv_namespaces]]
+# binding = "TOTALS_BACKUP"
+# id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[[kv_namespaces]]
+binding = "TOTALS_BACKUP"
+id = "6272736a0bac4dd7be876434954f2a54"
+
+# Optional R2 bucket for the prayer recordings (scaling). The Worker serves
+# /audio/* from it when bound, falling back to the static bundle until then.
+# Enable R2 in the dashboard first, then create + upload:
+#   npx wrangler r2 bucket create joining-palms-audio
+#   npm run audio:r2:upload
+# [[r2_buckets]]
+# binding = "AUDIO_BUCKET"
+# bucket_name = "joining-palms-audio"
+
+[vars]
+# Keep in sync with PROTOCOL_VERSION in src/protocol.js. Bump on shape change.
+PROTOCOL_VERSION = 3
+
+# Deployable origins for the WS upgrade (same-origin default covers these anyway).
+ALLOWED_ORIGINS = "https://joining-palms.app,https://joining-palms.prayer-earth.workers.dev"
+
+# --- deployable configuration (defaults live in src/worker.js) ---
+# Origin allow-list for WS upgrades (comma-separated origins). Unset/empty
+# allows any origin — fine for local dev, set this in production:
+# # extra origins example (same-origin default covers the primary host):
+# # ALLOWED_ORIGINS = "https://joining-palms.app,https://www.joining-palms.app"
+#
+# World sharding. 1 = everything lands on a single SyncRoom named 'world'.
+# Set > 1 to shard by coarse cell; clients then append ?cell=LLL,LLL to the
+# socket URL (see README "Sharding").
+# NUM_SHARDS = 1
+#
+# Per-connection message budget (messages/second, default 20). A connection
+# that exceeds it is closed.
+# MAX_MSG_PER_SEC = 20
+#
+# Optional throttle on new WebSocket upgrades per hashed peer address. 0 (the
+# default) disables it. Raw IPs are never logged — the key is a SHA-256 hash.
+# MAX_UPGRADES_PER_IP = 0
+# UPGRADE_WINDOW_MS = 60000
+#
+# Presence sweep: a session is stale after PRESENCE_TTL_MS of silence and the
+# DO wakes every SWEEP_ALARM_MS to sweep + flush durable writes.
+# PRESENCE_TTL_MS = 30000
+# SWEEP_ALARM_MS = 30000
+#
+# Min gap between counted prayer starts per session (protects durable totals
+# from prayerId-alternation inflation).
+# START_MIN_INTERVAL_MS = 10000
+#
+# Coordinator aggregate cache TTL for GET /stats.
+# COORD_CACHE_MS = 5000
+
+# Optional ops secret. When set, GET /stats?fresh=1 only bypasses the cache when
+# the request also carries `x-sync-admin: <value>`; otherwise ?fresh is ignored
+# (prevents public fan-out amplification). Set via `npx wrangler secret put
+# ADMIN_KEY` — never put a real value here.
+# ADMIN_KEY = ""
