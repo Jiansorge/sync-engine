@@ -8,6 +8,10 @@ compatibility_date = "2025-01-01"
 pattern = "joining-palms.app"
 custom_domain = true
 
+[[routes]]
+pattern = "www.joining-palms.app"
+custom_domain = true
+
 # Durable Objects that hold the live world.
 #   SyncRoom   — one shard of the world (v1: a single shard named 'world').
 #   Coordinator— aggregates all-time totals / users* across shards for /stats.
@@ -64,7 +68,7 @@ id = "6272736a0bac4dd7be876434954f2a54"
 PROTOCOL_VERSION = 3
 
 # Deployable origins for the WS upgrade (same-origin default covers these anyway).
-ALLOWED_ORIGINS = "https://joining-palms.app,https://joining-palms.prayer-earth.workers.dev"
+ALLOWED_ORIGINS = "https://joining-palms.app,https://www.joining-palms.app,https://joining-palms.prayer-earth.workers.dev"
 
 # --- deployable configuration (defaults live in src/worker.js) ---
 # Origin allow-list for WS upgrades (comma-separated origins). Unset/empty
