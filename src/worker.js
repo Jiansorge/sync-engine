@@ -177,9 +177,13 @@ export class Coordinator extends DurableObject {
           const stub = this.env.SYNC_ROOM.get(this.env.SYNC_ROOM.idFromName(name))
           const res = await stub.fetch('https://shard/summary')
           if (res.ok) summaries.push(await res.json())
-          else errors++
-        } catch {
+          else {
+            errors++
+            console.error(`sync-engine: shard ${name} summary returned ${res.status}`)
+          }
+        } catch (err) {
           errors++
+          console.error(`sync-engine: shard ${name} summary failed`, err && err.message)
         }
       })
     )

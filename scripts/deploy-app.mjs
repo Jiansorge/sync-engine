@@ -36,9 +36,9 @@ function ok(name) {
   console.log(`[deploy] ✓ ${name}`)
 }
 function fail(name, detail) {
-  console.error(`[deploy] ✗ ${name}`)
-  if (detail) console.error(String(detail))
-  process.exit(1)
+  const msg = `${name}${detail ? ' — ' + String(detail) : ''}`
+  console.error(`[deploy] ✗ ${msg}`)
+  throw new Error(msg)
 }
 
 function run(cmd, args, opts = {}) {
@@ -141,7 +141,18 @@ async function main() {
     return
   }
   log('Deploying Worker…')
-  run(npmCmd, ['run', 'deploy'], { cwd: ROOT })
+  try {
+    run(npmCmd, ['run', 'deploy'], { cwd: ROOT })
+  } catch (err) {
+    // A failed deploy must not leave public/ staged with a build the live
+    // Worker doesn't have — restore the backup so the repo matches production.
+    log('Deploy failed — restoring the previous public/ build.')
+    try {
+      rmSync(PUBLIC, { recursive: true, force: true })
+      cpSync(backup, PUBLIC, { recursive: true })
+    } catch {}
+    fail('deploy failed', (err && err.message) + ` — restored ${path.relative(ROOT, backup)}`)
+  }
   ok('deploy')
 
   // 6. Verify
@@ -163,4 +174,7 @@ function npxCmd() {
   return process.platform === 'win32' ? 'npx.cmd' : 'npx'
 }
 
-main().catch((e) => fail('unexpected error', e))
+main().catch((e) => {
+  console.error(`[deploy] ✗ ${e && e.message}`)
+  process.exit(1)
+})
