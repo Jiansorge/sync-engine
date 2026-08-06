@@ -1,0 +1,52 @@
+name: deploy
+
+# Ships the app + engine to joining-palms.app. Triggered automatically when the
+# prayer-earth CI passes (repository_dispatch), or manually from this repo.
+#
+# Required repo secrets:
+#   DEPLOY_PAT            — a fine-grained PAT with Contents:read on Jiansorge/prayer-earth
+#   CLOUDFLARE_API_TOKEN  — Cloudflare token with Workers Scripts:Edit + Workers Routes:Edit
+#   CLOUDFLARE_ACCOUNT_ID — the Cloudflare account id
+on:
+  repository_dispatch:
+    types: [deploy]
+  workflow_dispatch:
+
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sync-engine
+        uses: actions/checkout@v4
+        with:
+          path: sync-engine
+
+      - name: Checkout prayer-earth (sibling, as deploy-app expects)
+        uses: actions/checkout@v4
+        with:
+          repository: Jiansorge/prayer-earth
+          path: prayer-earth
+          token: ${{ secrets.DEPLOY_PAT }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            sync-engine/package-lock.json
+            prayer-earth/package-lock.json
+
+      - name: Install sync-engine deps
+        working-directory: sync-engine
+        run: npm ci
+
+      - name: Install prayer-earth deps
+        working-directory: prayer-earth
+        run: npm ci --legacy-peer-deps
+
+      - name: Ship (tests → build app → stage → deploy)
+        working-directory: sync-engine
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/deploy-app.mjs --no-auth
