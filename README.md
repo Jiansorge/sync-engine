@@ -2,8 +2,9 @@
 
 A **privacy-first, real-time sync layer** built on Cloudflare Workers + Durable
 Objects: WebSocket presence, live broadcasting, and durable anonymous state.
-It is intentionally **app-agnostic** — Prayer Earth is the first consumer, but
-any app that needs "who's here, live" can use it.
+It is intentionally **app-agnostic** — **Joining Palms** (formerly Prayer Earth,
+live at `https://joining-palms.app`) is the first consumer, but any app that
+needs "who's here, live" can use it.
 
 ## Why this architecture
 
@@ -142,6 +143,7 @@ npm run dev                 # local Workers runtime on http://127.0.0.1:8787
 npm test                    # vitest: protocol + DO integration (53 tests)
 npm run smoke ws://localhost:8790   # tiny WS client against a running `npm run dev`
 npm run deploy:app          # one-command deploy (test → build app → stage → deploy)
+npm run ship                # same as deploy:app — the easy "push everything live"
 npm run kv:setup            # once: create the TOTALS_BACKUP KV namespace
 npm run verify -- https://<worker>.workers.dev   # health + stats + live WS smoke
 ```
