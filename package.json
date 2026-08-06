@@ -24,6 +24,7 @@
     "deploy:app": "node scripts/deploy-app.mjs",
     "deploy:app:dry": "node scripts/deploy-app.mjs --dry-run",
     "kv:setup": "node scripts/setup-kv.mjs",
+    "cache:rules": "node scripts/setup-cache-rules.mjs",
     "audio:r2:upload": "node scripts/upload-audio-r2.mjs",
     "usage": "node scripts/check-usage.mjs",
     "verify": "node scripts/verify.mjs",
