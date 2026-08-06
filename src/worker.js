@@ -33,7 +33,7 @@ const DEFAULTS = {
   stateDebounceMs: 150, // broadcastState coalescing window
   feedDebounceMs: 250, // pushFeed coalescing window
   persistDebounceMs: 1000, // durable writer coalescing window
-  presenceTtlMs: 30000, // a session is stale after this much silence
+  presenceTtlMs: 60000, // a session is stale after this much silence (well above the 30s presence cadence)
   sweepAlarmMs: 30000, // how often the DO wakes to sweep/flush
   syncMinIntervalMs: 5000, // min gap between processed `sync` per connection
   startMinIntervalMs: 10000, // min gap between counted prayer starts per session

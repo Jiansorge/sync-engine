@@ -92,7 +92,7 @@ UPGRADE_WINDOW_MS = 60000
 #
 # Presence sweep: a session is stale after PRESENCE_TTL_MS of silence and the
 # DO wakes every SWEEP_ALARM_MS to sweep + flush durable writes.
-# PRESENCE_TTL_MS = 30000
+# PRESENCE_TTL_MS = 60000
 # SWEEP_ALARM_MS = 30000
 #
 # Min gap between counted prayer starts per session (protects durable totals

@@ -16,7 +16,9 @@ export default defineConfig({
             MAX_MSG_PER_SEC: 5,
             PRESENCE_TTL_MS: 2000,
             SWEEP_ALARM_MS: 5000,
-            ALLOWED_ORIGINS: ''
+            ALLOWED_ORIGINS: '',
+            // Prod throttle is per hashed IP; tests share one key, so disable it.
+            MAX_UPGRADES_PER_IP: 0
           }
       }
     })
