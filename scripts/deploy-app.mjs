@@ -11,7 +11,7 @@
 // Rollback: `node scripts/deploy-app.mjs --restore <backup-dir>` then redeploy.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, copyFileSync, cpSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, copyFileSync, cpSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -117,6 +117,8 @@ async function main() {
   for (const entry of readdirSync(path.join(PE, 'dist'))) {
     cpSync(path.join(PE, 'dist', entry), path.join(PUBLIC, entry), { recursive: true })
   }
+  // Keep the tracked marker so a fresh clone has the assets dir for `wrangler dev`.
+  writeFileSync(path.join(PUBLIC, '.gitkeep'), '')
   ok(`staged app build into public/ (${readdirSync(PUBLIC).length} entries)`)
 
   // 4. Warn if the origin allow-list isn't pinned (production)
