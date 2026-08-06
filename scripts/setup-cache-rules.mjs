@@ -52,8 +52,12 @@ const rules = [
     description: 'Hashed assets — immutable long cache',
     action_parameters: {
       cache: true,
-      edge_ttl: { mode: 'override_origin', status_code_ttl: [{ status_code: 200, value: 2629743 }] },
-      browser_ttl: { mode: 'override_origin', default: 31536000 }
+      edge_ttl: {
+        mode: 'override_origin',
+        default: 2629743, // 1 month
+        status_code_ttl: [{ status_code: 200, value: 2629743 }]
+      },
+      browser_ttl: { mode: 'override_origin', default: 31536000 } // 1 year
     }
   },
   {
@@ -62,7 +66,11 @@ const rules = [
     description: 'Audio — short cache so replaced recordings propagate',
     action_parameters: {
       cache: true,
-      edge_ttl: { mode: 'override_origin', status_code_ttl: [{ status_code: 200, value: 86400 }] },
+      edge_ttl: {
+        mode: 'override_origin',
+        default: 86400, // 1 day
+        status_code_ttl: [{ status_code: 200, value: 86400 }]
+      },
       browser_ttl: { mode: 'override_origin', default: 86400 }
     }
   }
