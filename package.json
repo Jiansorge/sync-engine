@@ -23,6 +23,7 @@
     "deploy": "wrangler deploy",
     "deploy:app": "node scripts/deploy-app.mjs",
     "deploy:app:dry": "node scripts/deploy-app.mjs --dry-run",
+    "ship": "node scripts/deploy-app.mjs",
     "kv:setup": "node scripts/setup-kv.mjs",
     "cache:rules": "node scripts/setup-cache-rules.mjs",
     "cache:purge": "node scripts/purge-cache.mjs",
