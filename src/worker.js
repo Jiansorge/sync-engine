@@ -61,7 +61,11 @@ const PAGE_HEADERS = {
   'content-type': 'text/html;charset=UTF-8',
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
-  'referrer-policy': 'strict-origin-when-cross-origin'
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'content-security-policy':
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; " +
+    "font-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 }
 async function servePage(request, env) {
   const resp = await env.ASSETS.fetch(request)
