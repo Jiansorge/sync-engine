@@ -62,7 +62,7 @@ id = "6272736a0bac4dd7be876434954f2a54"
 PROTOCOL_VERSION = 3
 
 # Deployable origins for the WS upgrade (same-origin default covers these anyway).
-ALLOWED_ORIGINS = "https://joining-palms.app,https://www.joining-palms.app"
+ALLOWED_ORIGINS = "https://joining-palms.app,https://www.joining-palms.app,capacitor://localhost"
 
 # Deter socket-churn abuse (botnets inflating people/feed + DO CPU): max new
 # WS upgrades per hashed peer IP per window. Raw IPs are never stored — only a
