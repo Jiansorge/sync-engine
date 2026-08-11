@@ -117,6 +117,9 @@ async function main() {
   for (const entry of readdirSync(path.join(PE, 'dist'))) {
     cpSync(path.join(PE, 'dist', entry), path.join(PUBLIC, entry), { recursive: true })
   }
+  // Carry the static-assets headers config through to the staged build.
+  const headersSrc = path.join(ROOT, '_headers')
+  if (existsSync(headersSrc)) copyFileSync(headersSrc, path.join(PUBLIC, '_headers'))
   // Keep the tracked marker so a fresh clone has the assets dir for `wrangler dev`.
   writeFileSync(path.join(PUBLIC, '.gitkeep'), '')
   ok(`staged app build into public/ (${readdirSync(PUBLIC).length} entries)`)

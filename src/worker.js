@@ -52,6 +52,24 @@ const JSON_HEADERS = {
 }
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: JSON_HEADERS })
 
+// The app shell (/) is served here in the Worker (run_worker_first), so the
+// `_headers` static-assets rules don't reach it — attach the security headers
+// directly. Hashed /assets/*, /audio/* and icons are served by the assets
+// runtime with their own headers from _headers.
+const PAGE_HEADERS = {
+  'cache-control': 'public, max-age=0, must-revalidate',
+  'content-type': 'text/html;charset=UTF-8',
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'strict-origin-when-cross-origin'
+}
+async function servePage(request, env) {
+  const resp = await env.ASSETS.fetch(request)
+  const headers = new Headers(resp.headers)
+  for (const [k, v] of Object.entries(PAGE_HEADERS)) headers.set(k, v)
+  return new Response(resp.body, { status: resp.status, headers })
+}
+
 // Anonymous usage counters (never personal data).
 const EMPTY_COUNTS = () => ({ connects: 0, messages: 0, presence: 0, sync: 0, starts: 0, errors: 0 })
 
@@ -118,7 +136,7 @@ export default {
         const id = env.COORDINATOR.idFromName('global')
         return env.COORDINATOR.get(id).fetch(request)
       }
-      return env.ASSETS.fetch(request)
+      return servePage(request, env)
     }
 
     return new Response('Not found', { status: 404 })

@@ -1,0 +1,34 @@
+# Static-asset caching + security headers (Cloudflare Workers Static Assets)
+#
+# Content-hashed build outputs (index-<hash>.js / .css and the locale chunks)
+# are immutable — a new deploy emits new filenames, so a long-lived cache never
+# serves stale code. index.html and sw.js must revalidate instead.
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+  X-Content-Type-Options: nosniff
+
+# Audio filenames are not content-hashed and may be regenerated in place, so we
+# cache them for a long time but WITHOUT `immutable` — the documented deploy
+# keeps serving them from the edge and purges the CDN for /audio/* on regen.
+/audio/*
+  Cache-Control: public, max-age=2592000
+  X-Content-Type-Options: nosniff
+
+/icons/*
+  Cache-Control: public, max-age=31536000, immutable
+  X-Content-Type-Options: nosniff
+
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+
+/sw.js
+  Cache-Control: no-cache
+  X-Content-Type-Options: nosniff
+
+/manifest.webmanifest
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Content-Type-Options: nosniff
