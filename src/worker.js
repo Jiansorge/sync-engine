@@ -63,8 +63,9 @@ const PAGE_HEADERS = {
   'x-frame-options': 'DENY',
   'referrer-policy': 'strict-origin-when-cross-origin',
   'content-security-policy':
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-    "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; " +
+    "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; " +
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
+    "media-src 'self' blob:; connect-src 'self' ws: wss: https://static.cloudflareinsights.com; " +
     "font-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 }
 async function servePage(request, env) {
