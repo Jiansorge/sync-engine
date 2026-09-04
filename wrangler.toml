@@ -36,6 +36,11 @@ directory = "./public"
 binding = "ASSETS"
 run_worker_first = ["/", "/health", "/stats"]
 
+# The `/` app shell is served by the Worker (run_worker_first) and now carries
+# Cache-Control: s-maxage=3600 — Cloudflare's CDN caches it so repeat visits
+# and bot/scanner crawls are served from the edge without reaching the Worker.
+# A Cache Rule for `/` (see scripts/setup-cache-rules.mjs) reinforces this.
+
 # Optional disaster-recovery KV. When bound, each SyncRoom mirrors its lifetime
 # totals (prayer/spirit counts + seconds — anonymous aggregates only) to this KV
 # every ~6h, so the world's lifetime counts can be restored if DO storage is
@@ -60,6 +65,13 @@ id = "6272736a0bac4dd7be876434954f2a54"
 [vars]
 # Keep in sync with PROTOCOL_VERSION in src/protocol.js. Bump on shape change.
 PROTOCOL_VERSION = 3
+
+# Per-IP sliding-window cap on non-WebSocket GETs (page + /stats + /health).
+# Above this many requests in HTTP_RATE_WINDOW_MS the Worker returns 429. It is
+# a first line of defense against floods/bots; the edge cache on / absorbs most
+# repeat traffic. A human makes a few GETs per visit, so 60/10s is generous.
+HTTP_RATE_MAX = 60
+HTTP_RATE_WINDOW_MS = 10000
 
 # Deployable origins for the WS upgrade (same-origin default covers these anyway).
 ALLOWED_ORIGINS = "https://joining-palms.app,https://www.joining-palms.app,capacitor://localhost"
