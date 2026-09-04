@@ -1,10 +1,44 @@
 # sync-engine
 
+[![CI](https://github.com/Jiansorge/sync-engine/actions/workflows/test.yml/badge.svg)](https://github.com/Jiansorge/sync-engine/actions/workflows/test.yml)
+[![Live — joining-palms.app](https://img.shields.io/badge/live-joining--palms.app-DFB05C)](https://joining-palms.app)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+
 A **privacy-first, real-time sync layer** built on Cloudflare Workers + Durable
 Objects: WebSocket presence, live broadcasting, and durable anonymous state.
 It is intentionally **app-agnostic** — **Joining Palms** (formerly Prayer Earth,
 live at `https://joining-palms.app`) is the first consumer, but any app that
 needs "who's here, live" can use it.
+
+## Preview
+
+```
+Browser (Prayer Earth)                 Cloudflare
+┌─────────────────────┐   WS   ┌───────────────────────────────┐
+│  sync/engine.js     │ ─────▶ │ Worker + ASSETS (edge cache)  │
+│  145 prayers × 15 traditions    │   · SyncRoom / Coordinator DOs│
+│  12 languages, PWA  │        │   · live lights + durable totals│
+└─────────────────────┘        └───────────────────────────────┘
+```
+
+*This repo is **public and contains zero secrets** — safe to share. No `CF_API_TOKEN`, no `ADMIN_KEY`, no KV/R2 IDs beyond the public namespace id (which is not a credential). See **Private data** below.*
+
+## Project
+
+* **What it does:** `presence` (who's praying now, coarse 1° cell), `feed` (recent prayers), `sync` (anonymous lifetime counters, max-merged), all over a single WebSocket. See `src/protocol.js` (single source of truth, drift-tested).
+* **Why Workers + DOs:** ~$0/mo free tier, global edge, SQLite-backed DO storage survives every deploy, no cold starts. App swaps `SyncEngine`→`CfEngine` with zero app-code change.
+* **Reuse:** Copy `src/engine.js` + `src/protocol.js` — any app needing "who's here live" can use it.
+
+## Private data
+
+| What | How we handle it |
+|---|---|
+| **Location** | Only coarse **1° cell** (`gridKey`) ever sent; precise lat/lng never leaves device. Server re-rounds `cell` into `[-180,180)` grid. |
+| **Identity** | No accounts. `anonId` is random UUID, `name`/`avatar` user-chosen, stored in `localStorage` only. |
+| **IPs** | Raw IPs **never logged** — upgrade throttle stores only `SHA-256(IP)` in memory. |
+| **Payloads** | Caps: `name` 24, ids 60, `anonId` 64, WS 64KB, `sync` 250KB; `__proto__`/`constructor` stripped. |
+| **Secrets** | **None in repo.** `wrangler.toml` vars are non-secret; real `ADMIN_KEY`/`CF_API_TOKEN` live in `wrangler secret` / GitHub Secrets. `.dev.vars`/`.env` are gitignored (`sync-engine/.gitignore`). |
+| **Compliance** | Anonymous aggregates only; durable totals mirror to `TOTALS_BACKUP` KV every ~6h + 30-day PITR. |
 
 ## Why this architecture
 
