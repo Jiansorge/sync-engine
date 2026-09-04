@@ -57,7 +57,11 @@ const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, 
 // directly. Hashed /assets/*, /audio/* and icons are served by the assets
 // runtime with their own headers from _headers.
 const PAGE_HEADERS = {
-  'cache-control': 'public, max-age=0, must-revalidate',
+  // Edge-cache the app shell so repeat visits (and bot/scanner crawls) are
+  // served from the CDN without ever reaching the Worker. max-age lets the
+  // browser hold it briefly; s-maxage is the edge TTL; stale-while-revalidate
+  // keeps the world responsive while a fresh copy is fetched in the background.
+  'cache-control': 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400',
   'content-type': 'text/html;charset=UTF-8',
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
@@ -95,6 +99,26 @@ function getThrottle(env) {
   return upgradeThrottle
 }
 
+// ---- HTTP request rate limiting (DDoS / scrape defense) ----
+// Per-IP sliding-window limiter for every non-WebSocket GET (app shell,
+// /stats, /health). In-memory per isolate — a first line of defense that
+// blunts floods/bots; the edge cache on / does the heavy lifting by serving
+// repeat visits without ever reaching the Worker. Tune via env if needed.
+const httpRateBuckets = new Map() // ip -> { start, count }
+function httpRateLimited(ip, max, windowMs) {
+  const now = Date.now()
+  let b = httpRateBuckets.get(ip)
+  if (!b || now - b.start >= windowMs) {
+    b = { start: now, count: 0 }
+    httpRateBuckets.set(ip, b)
+  }
+  b.count++
+  if (httpRateBuckets.size > 2000) {
+    for (const [k, v] of httpRateBuckets) if (now - v.start >= windowMs) httpRateBuckets.delete(k)
+  }
+  return b.count > max
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
@@ -122,6 +146,17 @@ export default {
     }
 
     if (request.method === 'GET') {
+      // First line of defense against floods/bots: cap requests per source IP.
+      // Legitimate users make a handful of GETs per visit; anything above the
+      // window is rejected before it can reach the Durable Object. The edge
+      // cache on / already absorbs most repeat traffic; this caps the rest.
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown'
+      if (httpRateLimited(ip, envNum(env, 'HTTP_RATE_MAX', 60), envNum(env, 'HTTP_RATE_WINDOW_MS', 10000))) {
+        return new Response('Too Many Requests', {
+          status: 429,
+          headers: { 'retry-after': '10', 'cache-control': 'no-store' }
+        })
+      }
       // Recordings are served from the R2 bucket when it's configured (audio/
       // keys), falling back to the static bundle otherwise. R2 = no egress fees
       // and keeps the ~60 MB of MP3s out of the Worker bundle. No binding = the

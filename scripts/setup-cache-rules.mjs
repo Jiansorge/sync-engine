@@ -7,9 +7,10 @@
 //   - Zone | Zone | Read
 //   Zone Resources: Include → Specific zone → joining-palms.app
 //
-// Creates two rules on the zone:
-//   1. /assets/* → edge 1 month, browser 1 year  (hashed filenames — safe)
-//   2. /audio/*  → edge 1 day, browser 1 day       (short so replacements propagate)
+// Creates three rules on the zone:
+//   1. /         → edge 1 hour, browser 5 min   (app shell — drops repeat visits)
+//   2. /assets/* → edge 1 month, browser 1 year  (hashed filenames — safe)
+//   3. /audio/*  → edge 1 day, browser 1 day       (short so replacements propagate)
 
 const ZONE_NAME = process.env.CF_ZONE_NAME || 'joining-palms.app'
 const TOKEN = process.env.CF_API_TOKEN
@@ -46,6 +47,20 @@ if (!zone) {
 console.log(`Zone: ${ZONE_NAME} (${zone.id})`)
 
 const rules = [
+  {
+    action: 'set_cache_settings',
+    expression: `(http.host eq "${ZONE_NAME}" and (http.request.uri.path eq "/" or http.request.uri.path eq "/index.html"))`,
+    description: 'App shell — short edge cache to drop repeat visits',
+    action_parameters: {
+      cache: true,
+      edge_ttl: {
+        mode: 'override_origin',
+        default: 3600, // 1 hour
+        status_code_ttl: [{ status_code: 200, value: 3600 }]
+      },
+      browser_ttl: { mode: 'override_origin', default: 300 } // 5 min
+    }
+  },
   {
     action: 'set_cache_settings',
     expression: `(http.host eq "${ZONE_NAME}" and http.request.uri.path contains "/assets/")`,
