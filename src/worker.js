@@ -68,7 +68,7 @@ const PAGE_HEADERS = {
   'referrer-policy': 'strict-origin-when-cross-origin',
   'content-security-policy':
     "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; " +
-    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://storage.ko-fi.com; " +
     "media-src 'self' blob:; connect-src 'self' ws: wss: https://static.cloudflareinsights.com; " +
     "font-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 }
