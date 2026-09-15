@@ -28,6 +28,13 @@ const MAX_WS_MSG = 65536 // raw bytes, checked before parsing
 const MAX_SYNC_STATS = 250000 // serialized size of a `sync` stats blob
 const MAX_FEED = 40 // live feed window, bounded
 const MAX_SEEN = 20000 // eager anonSeen prune only above this size (else on alarm)
+const MAX_TOTALS_KEYS = 1000 // ceiling on distinct durable prayer/spirit ids
+// Keys a hostile client could abuse against plain-object maps. prayerId/spiritId
+// are client-supplied strings and are used directly as keys in the durable
+// totals — reject the prototype trio so totals can't be poisoned with string
+// values or a polluted prototype.
+const DANGEROUS = new Set(['__proto__', 'constructor', 'prototype'])
+const safeKey = (k) => typeof k === 'string' && k.length > 0 && !DANGEROUS.has(k)
 const DEFAULTS = {
   maxMsgPerSec: 20, // per-connection message budget
   stateDebounceMs: 150, // broadcastState coalescing window
@@ -448,8 +455,10 @@ export class SyncRoom extends DurableObject {
 
     if (isNewStart) {
       session.lastStartAt = now
-      this._totals.prayers[session.prayerId] = (this._totals.prayers[session.prayerId] || 0) + 1
-      if (session.spiritId) {
+      if (safeKey(session.prayerId) && Object.keys(this._totals.prayers).length < MAX_TOTALS_KEYS) {
+        this._totals.prayers[session.prayerId] = (this._totals.prayers[session.prayerId] || 0) + 1
+      }
+      if (session.spiritId && safeKey(session.spiritId) && Object.keys(this._totals.spirits).length < MAX_TOTALS_KEYS) {
         this._totals.spirits[session.spiritId] = (this._totals.spirits[session.spiritId] || 0) + 1
       }
       this._totals.updatedAt = now
@@ -544,7 +553,7 @@ export class SyncRoom extends DurableObject {
     const lightSpirits = {}
     let people = 0
     for (const s of this.sessions.values()) {
-      if (!s.prayerId) continue
+      if (!s.prayerId || !safeKey(s.prayerId) || !safeKey(s.spiritId)) continue
       people += 1
       prayers[s.prayerId] = (prayers[s.prayerId] || 0) + 1
       if (s.spiritId) spirits[s.spiritId] = (spirits[s.spiritId] || 0) + 1
@@ -676,23 +685,23 @@ export class SyncRoom extends DurableObject {
     // real durable data after a failed read would lose data permanently.
     if (!this._loaded) return
     const jobs = []
-    if (this._totalsDirty) {
-      jobs.push(this.ctx.storage.put('totals', this._totals))
-      this._totalsDirty = false
+    if (this._totalsDirty) jobs.push(this.ctx.storage.put('totals', { ...this._totals }))
+    if (this._secondsDirty) jobs.push(this.ctx.storage.put('totalPrayerSeconds', this._totalSeconds))
+    if (this._seenDirty) jobs.push(this.ctx.storage.put('anonSeen', Array.from(this._anonSeen.entries())))
+    if (this._countsDirty) jobs.push(this.ctx.storage.put('counts', this._counts))
+    if (jobs.length) {
+      try {
+        await Promise.all(jobs)
+        // Only clear the flags after the writes resolve: a transient rejection
+        // must not lose those counts (clearing first would mark them flushed).
+        this._totalsDirty = false
+        this._secondsDirty = false
+        this._seenDirty = false
+        this._countsDirty = false
+      } catch (err) {
+        console.error('sync-engine: storage flush failed', err && err.message)
+      }
     }
-    if (this._secondsDirty) {
-      jobs.push(this.ctx.storage.put('totalPrayerSeconds', this._totalSeconds))
-      this._secondsDirty = false
-    }
-    if (this._seenDirty) {
-      jobs.push(this.ctx.storage.put('anonSeen', Array.from(this._anonSeen.entries())))
-      this._seenDirty = false
-    }
-    if (this._countsDirty) {
-      jobs.push(this.ctx.storage.put('counts', this._counts))
-      this._countsDirty = false
-    }
-    if (jobs.length) await Promise.all(jobs)
   }
 
   _ensureLoaded() {
