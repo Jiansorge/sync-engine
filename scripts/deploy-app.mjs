@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync, copyFileSync, cpSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { verifyLive } from './verify-live.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PUBLIC = path.join(ROOT, 'public')
@@ -91,6 +92,9 @@ async function main() {
     log('Running sync-engine tests…')
     run(npmCmd, ['test'], { cwd: ROOT })
     ok('tests')
+    log('Running prayer-earth server aggregation tests…')
+    run(process.execPath, [path.join(PE, 'scripts', 'test-server.mjs')], { cwd: PE })
+    ok('app server tests')
   }
 
   // 2. Build the app with the Cloudflare engine selected
@@ -103,6 +107,12 @@ async function main() {
     ok('app build')
   }
   if (!hasDist()) fail('app build produced no dist/index.html')
+
+  // 2b. Audit the built assets (no inline executable scripts, SW CORE intact,
+  //     entry CSS inlined) BEFORE staging — a violation must never ship.
+  log('Auditing built assets…')
+  run(process.execPath, [path.join(PE, 'scripts', 'audit-build.mjs')], { cwd: PE })
+  ok('asset audit')
 
   // 3. Back up the current public/ and stage the app build into it
   const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
@@ -163,38 +173,20 @@ async function main() {
   //    Worker stops getting requests and /health + /stats return the SPA HTML
   //    instead of JSON (and WebSocket upgrades hand back HTML, never 101). We
   //    assert all three and restore the previous build if anything is off.
+  //    Real logic lives in scripts/verify-live.mjs (shared with `npm run verify`).
   log('Verifying live site…')
   const base = (args.find((a) => a.startsWith('--url=')) || '--url=https://joining-palms.app').slice('--url='.length)
   let verifyFail = null
   try {
-    const checkJson = async (path) => {
-      const r = await fetch(base + path)
-      const ct = (r.headers.get('content-type') || '').toLowerCase()
-      const body = await r.text()
-      if (!ct.includes('application/json') && !body.trim().startsWith('{')) {
-        return `expected Worker JSON on ${base}${path}, got ${ct || 'no content-type'} (assets fallback?)`
-      }
-      if (path === '/health' && !body.includes('"ok":true')) {
-        return `health ok flag missing on ${base}${path}`
-      }
-      return null
+    const { ok: liveOk, failed } = await verifyLive(base)
+    if (!liveOk) {
+      for (const f of failed) console.error(`[deploy]   ✗ ${f.name} — ${f.detail}`)
+      throw new Error(failed.map((f) => f.name).join(', '))
     }
-    const health = await checkJson('/health')
-    const stats = await checkJson('/stats')
-    verifyFail = health || stats || null
-    if (verifyFail) throw new Error(verifyFail)
     ok('Worker JSON on /health + /stats')
+    ok('WebSocket smoke')
   } catch (err) {
     verifyFail = (err && err.message) || 'verify failed'
-  }
-  if (!verifyFail) {
-    const smoke = spawnSync(
-      process.platform === 'win32' ? 'npm.cmd' : 'npm',
-      ['run', 'smoke', '--', base.replace(/^https/, 'wss')],
-      { stdio: 'inherit', shell: process.platform === 'win32', cwd: ROOT, env: { ...process.env, NODE_OPTIONS: '--experimental-websocket' } }
-    )
-    verifyFail = smoke.status === 0 ? null : `ws smoke failed (exit ${smoke.status})`
-    if (!verifyFail) ok('WebSocket smoke')
   }
   if (verifyFail) {
     log(`VERIFICATION FAILED — ${verifyFail}`)
