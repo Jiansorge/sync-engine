@@ -34,9 +34,9 @@
     "smoke": "node scripts/smoke-ws.mjs"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.20.1",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "vitest": "^4.1.10",
-    "wrangler": "^4.119.0"
+    "wrangler": "^4.133.0"
   },
   "overrides": {
     "undici": "^7.29.0"
