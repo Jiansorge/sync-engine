@@ -43,9 +43,14 @@ function fail(name, detail) {
 }
 
 function run(cmd, args, opts = {}) {
-  // Windows can't spawn .cmd directly without a shell (EINVAL).
-  const r = spawnSync(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32', ...opts })
-  if (r.status !== 0) fail(`${cmd} ${args.join(' ')}`, 'exited non-zero')
+  // Windows can't spawn .cmd directly without a shell (EINVAL). But a shell
+  // also splits *unquoted* paths on spaces — so quote the executable and any
+  // arg that contains a space when we're going through a shell.
+  const q = (s) => (/ /.test(s) ? `"${s}"` : s)
+  const quotedCmd = process.platform === 'win32' ? q(cmd) : cmd
+  const quotedArgs = process.platform === 'win32' ? args.map(q) : args
+  const r = spawnSync(quotedCmd, quotedArgs, { stdio: 'inherit', shell: process.platform === 'win32', ...opts })
+  if (r.status !== 0) fail(`${quotedCmd} ${quotedArgs.join(' ')}`, 'exited non-zero')
   return r
 }
 

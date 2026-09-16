@@ -74,17 +74,30 @@ export function smokeCheck(url) {
 }
 
 // Run /health + /stats, then the WS smoke unless skipWs. Returns { ok, failed, passed }.
-export async function verifyLive(base, { skipWs = false } = {}) {
+// Checks retry over the Cloudflare edge-propagation window: immediately after
+// `wrangler deploy` returns, some edges may still answer with the previous
+// version (or, worst case, the static-assets SPA shell) for a few seconds. A
+// single probe that catches that window would read as a broken deploy when the
+// rollout is actually fine — so each check tries repeatedly before failing.
+export async function verifyLive(base, { skipWs = false, retries = 4, delayMs = 3000 } = {}) {
   const results = []
   const run = async (name, fn) => {
-    try {
-      const res = await fn()
-      results.push({ name, ok: res.ok, detail: res.reason || res.detail })
-      return res.ok
-    } catch (e) {
-      results.push({ name, ok: false, detail: e && e.message })
-      return false
+    let last = null
+    for (let i = 0; i <= retries; i++) {
+      try {
+        const res = await fn()
+        if (res.ok) {
+          results.push({ name, ok: true, detail: res.detail, after: i })
+          return true
+        }
+        last = res.reason || 'check failed'
+      } catch (e) {
+        last = e && e.message
+      }
+      if (i < retries) await new Promise((r) => setTimeout(r, delayMs))
     }
+    results.push({ name, ok: false, detail: last, after: retries })
+    return false
   }
   const h = await run('GET /health', () => checkHealth(base))
   const s = await run('GET /stats', () => checkStats(base))
