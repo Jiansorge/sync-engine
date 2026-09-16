@@ -12,6 +12,12 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Check /health and /stats
         id: health
         run: |
@@ -35,18 +41,30 @@ jobs:
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
           echo "detail=$detail" >> "$GITHUB_OUTPUT"
 
-      - name: Open issue if down or degraded (deduped)
-        if: steps.health.outputs.ok == 'no'
+      - name: WebSocket smoke (upgrade must 101, not assets HTML)
+        id: ws
+        run: |
+          output=$(node scripts/smoke-ws.mjs wss://joining-palms.app 2>&1 || true)
+          echo "$output"
+          ok="no"
+          if echo "$output" | grep -q "SMOKE OK"; then ok="yes"; fi
+          echo "ws_ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Open issue if down, degraded, or WS broken (deduped)
+        if: steps.health.outputs.ok == 'no' || steps.ws.outputs.ws_ok == 'no'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           detail="${{ steps.health.outputs.detail }}"
+          if [ "${{ steps.ws.outputs.ws_ok }}" = "no" ]; then
+            if [ -n "$detail" ]; then detail="$detail; websocket smoke failed"; else detail="websocket smoke failed"; fi
+          fi
           exists=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label uptime --json number -q '.[0].number' 2>/dev/null || true)
           if [ -z "$exists" ]; then
             gh issue create --repo "$GITHUB_REPOSITORY" \
               --title "Uptime: joining-palms.app health check failing" \
               --label uptime \
-              --body "Check failed at $(date -u): $detail. Investigate: /health, /stats, wrangler tail, DO status."
+              --body "Check failed at $(date -u): $detail. Investigate: /health, /stats, WebSocket handshake, wrangler tail, DO status."
           else
             echo "open issue #$exists already exists"
           fi

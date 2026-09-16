@@ -158,19 +158,54 @@ async function main() {
   }
   ok('deploy')
 
-  // 6. Verify
-  log('Verifying /health…')
-  const url = args.find((a) => a.startsWith('--url='))
-  if (url) {
-    const base = url.slice('--url='.length)
-    run(process.platform === 'win32' ? 'curl.exe' : 'curl', ['-s', `${base}/health`])
-    log(`Smoke: npx wrangler dev is not needed — run \`npm run smoke ${base.replace(/^https/, 'wss')}\` from a browser/Node with ws.`)
-  } else {
-    log('Deployed. Verify with:')
-    log('  curl https://<your-worker>/health')
-    log('  npm run smoke wss://<your-worker>')
+  // 6. Verify — the site must answer as the WORKER, not the static assets
+  //    fallback. The failure mode we protect against: after a bad deploy the
+  //    Worker stops getting requests and /health + /stats return the SPA HTML
+  //    instead of JSON (and WebSocket upgrades hand back HTML, never 101). We
+  //    assert all three and restore the previous build if anything is off.
+  log('Verifying live site…')
+  const base = (args.find((a) => a.startsWith('--url=')) || '--url=https://joining-palms.app').slice('--url='.length)
+  let verifyFail = null
+  try {
+    const checkJson = async (path) => {
+      const r = await fetch(base + path)
+      const ct = (r.headers.get('content-type') || '').toLowerCase()
+      const body = await r.text()
+      if (!ct.includes('application/json') && !body.trim().startsWith('{')) {
+        return `expected Worker JSON on ${base}${path}, got ${ct || 'no content-type'} (assets fallback?)`
+      }
+      if (path === '/health' && !body.includes('"ok":true')) {
+        return `health ok flag missing on ${base}${path}`
+      }
+      return null
+    }
+    const health = await checkJson('/health')
+    const stats = await checkJson('/stats')
+    verifyFail = health || stats || null
+    if (verifyFail) throw new Error(verifyFail)
+    ok('Worker JSON on /health + /stats')
+  } catch (err) {
+    verifyFail = (err && err.message) || 'verify failed'
   }
-  log(`Rollback backup: node scripts/deploy-app.mjs --restore ${stamp}`)
+  if (!verifyFail) {
+    const smoke = spawnSync(
+      process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      ['run', 'smoke', '--', base.replace(/^https/, 'wss')],
+      { stdio: 'inherit', shell: process.platform === 'win32', cwd: ROOT, env: { ...process.env, NODE_OPTIONS: '--experimental-websocket' } }
+    )
+    verifyFail = smoke.status === 0 ? null : `ws smoke failed (exit ${smoke.status})`
+    if (!verifyFail) ok('WebSocket smoke')
+  }
+  if (verifyFail) {
+    log(`VERIFICATION FAILED — ${verifyFail}`)
+    log('Restoring the previous public/ build (the live Worker now diverges from repo).')
+    try {
+      rmSync(PUBLIC, { recursive: true, force: true })
+      cpSync(backup, PUBLIC, { recursive: true })
+    } catch {}
+    fail('post-deploy verification failed', verifyFail + ` — restored ${path.relative(ROOT, backup)}`)
+  }
+  log('Deployed+verified. Rollback backup: node scripts/deploy-app.mjs --restore ' + stamp)
 }
 
 function npxCmd() {
