@@ -118,6 +118,83 @@ a re-sync after any loss re-accumulates from the device.
 - `npm run smoke https://your.worker.dev` → presence → state → sync → ping/pong
 - Static page served at the root (assets binding).
 
+## CI/CD pipeline — automated ship with safety gates
+
+A code push through `main` reaches production with two automatic verifications
+and rolling back built in. Nothing deployable happens by hand.
+
+### Flow
+
+```
+push prayer-earth main
+  └─ test.yml (build + asset audit + server/i18n tests)
+       └─ repository_dispatch ──▶ sync-engine deploy.yml
+            └─ node scripts/deploy-app.mjs --no-auth
+                 └─ tests → build (CfEngine) → asset audit → stage (backup public/)
+                    → wrangler deploy → VERSION-CONTRACT GATE → LIVE-ENDPOINT GATE
+```
+
+The whole flow uses `deploy-app.mjs` (the same "ship" script a human runs), so CI
+and local deploys can never drift. GitHub repo secrets used — **names only, values
+never leave the repo settings**:
+
+| Secret | Purpose |
+|---|---|
+| `DEPLOY_PAT` | `prayer-earth/test.yml` dispatches to `sync-engine`; `deploy.yml` checks out `prayer-earth` |
+| `CLOUDFLARE_API_TOKEN` | wrangler auth in CI (Workers Scripts + Workers Routes on the zone) |
+| `CLOUDFLARE_ACCOUNT_ID` | the account the Worker + zone live on |
+
+### Safety gate 1 — version contract (`scripts/verify-version.mjs`)
+
+Immediately after deploy, the **live deployed version's resources** are read back
+from the Workers API and asserted against what `wrangler.toml` declares:
+
+- the fetch handler exists (`script.handlers` contains `fetch`),
+- the expected bindings are present (`ASSETS`, `SYNC_ROOM`, `COORDINATOR`,
+  `TOTALS_BACKUP`),
+- `compatibility_date` is still the pinned one from `wrangler.toml`,
+- static assets are worker-first for `/health` and `/stats` (no SPA fallback that
+  would answer those paths with HTML instead of Worker JSON).
+
+A deploy whose live resources diverge from the contract — e.g. a
+config-stripped static-assets-only upload with no handler — is rejected **at
+deploy time**, before any /health symptom appears.
+
+### Safety gate 2 — live endpoints (`scripts/verify-live.mjs`)
+
+Runs against the public URL and retries across the edge-propagation window:
+
+- `GET /health` and `GET /stats` must answer **Worker JSON** (never the SPA HTML
+  fallback) at the current `PROTOCOL_VERSION`;
+- a live WebSocket upgrade must return a real `101` and complete a
+  presence → state → sync → ping/pong smoke.
+
+### Rollback
+
+If either gate fails, `deploy-app.mjs` **restores the previous `public/` build**
+from `public-backups/<timestamp>` and exits non-zero — the deploy is undone
+locally and the CI run is marked failed. (The Worker can also be rolled back far
+enough with `node scripts/deploy-app.mjs --restore <pattern>` + `npm run deploy`.)
+
+### Ongoing watch — `uptime.yml`
+
+Separate scheduled workflow (every 5 min, independent of deploys):
+
+- `/health` + `/stats` must be Worker JSON,
+- the WebSocket smoke must pass,
+- the version-contract check must stay green.
+
+On failure it opens a **deduplicated** GitHub issue (one open issue at a time),
+so a silently degraded live version never goes unnoticed.
+
+### Manual equivalents
+
+```bash
+npm run ship              # full pipeline including both gates
+npm run verify -- https://joining-palms.app          # live-endpoint gate only
+npm run verify:version                              # version-contract gate only
+```
+
 ## Scaling to shards (later)
 
 Set `NUM_SHARDS = 8` and have clients append `?cell=LLL,LLL` to the socket URL;
@@ -188,22 +265,22 @@ consumer app should expect when it flips `VITE_SYNC_ENGINE`):
 - **Feed is per-shard** (and per-engine) — entries are never cross-shard merged.
 
 
-## Cache invalidation � after changing the MP3 library or removing prayers
+## Cache invalidation � after changing the MP3 library or removing prayers
 
 The app's service worker is **cache-first for every same-origin GET, including
 `/audio/*.mp3`**, and Cloudflare's CDN caches static assets at the edge. So when
 the prayer library changes (new recordings, renamed files, or prayers removed),
 stale audio can keep being served. The process to push fresh audio:
 
-1. **Bump the app's service-worker cache version** � edit
+1. **Bump the app's service-worker cache version** � edit
    `prayer-earth/public/sw.js`: `const CACHE = 'prayer-earth-vX'` ? bump X. On
    the next load the new SW installs, its `activate` deletes the old cache, and
    it re-caches the fresh files. This is the primary mechanism.
 2. **Purge the Cloudflare CDN cache for `/audio/*`** when the app is served
    through this Worker (via `env.ASSETS`): Cloudflare edge cache purge from the
-   dashboard, or `npx wrangler` / the API � otherwise the edge keeps handing out
+   dashboard, or `npx wrangler` / the API � otherwise the edge keeps handing out
    the old MP3s even after the SW clears.
-3. **No action needed for the app's in-memory audio cache** � `cloudCache`
+3. **No action needed for the app's in-memory audio cache** � `cloudCache`
    (speech.js) is per-session and clears on reload.
 4. **Removed prayers**: after the SW version bump, the old files are simply no
    longer referenced; you may delete them from the assets/deploy in the same

@@ -200,7 +200,7 @@ Tests (`test/`):
 ## Deployment
 
 > Full, current guides: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) (per-tenant
-> deploy + hardening), [`docs/OPERATIONS.md`](docs/OPERATIONS.md) (runbook:
+> deploy + CI/CD safety gates), [`docs/OPERATIONS.md`](docs/OPERATIONS.md) (runbook:
 > monitoring, backup/RPO, incident quick-ref), and
 > [`docs/SECURITY.md`](docs/SECURITY.md) (trust model + audit findings).
 
