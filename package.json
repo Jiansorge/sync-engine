@@ -30,6 +30,7 @@
     "audio:r2:upload": "node scripts/upload-audio-r2.mjs",
     "usage": "node scripts/check-usage.mjs",
     "verify": "node scripts/verify.mjs",
+    "verify:version": "node scripts/verify-version.mjs",
     "test": "vitest run",
     "smoke": "node scripts/smoke-ws.mjs"
   },

@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, rmSync, copyFileSync, cpSync, readdirSync, readF
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { verifyLive } from './verify-live.mjs'
+import { checkLiveVersionContract } from './verify-version.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PUBLIC = path.join(ROOT, 'public')
@@ -179,10 +180,21 @@ async function main() {
   //    instead of JSON (and WebSocket upgrades hand back HTML, never 101). We
   //    assert all three and restore the previous build if anything is off.
   //    Real logic lives in scripts/verify-live.mjs (shared with `npm run verify`).
+  //    We ALSO assert the deployed version's resources carry the full Worker
+  //    contract (fetch handler, bindings, pinned compat date, worker-first
+  //    routing) via scripts/verify-version.mjs — catching a config-stripped
+  //    static-assets upload before its /health symptoms even start. A version
+  //    that passes /health for days is still wrong if it is a Pages-style SPA.
   log('Verifying live site…')
   const base = (args.find((a) => a.startsWith('--url=')) || '--url=https://joining-palms.app').slice('--url='.length)
   let verifyFail = null
   try {
+    const version = await checkLiveVersionContract({ requireAuth: !noAuth })
+    if (!version.ok) {
+      for (const reason of version.reasons) console.error(`[deploy]   ✗ version contract — ${reason}`)
+      throw new Error(`live version ${version.versionId} violates the Worker contract`)
+    }
+    ok(`live version ${version.versionId} carries the full Worker contract`)
     const { ok: liveOk, failed } = await verifyLive(base)
     if (!liveOk) {
       for (const f of failed) console.error(`[deploy]   ✗ ${f.name} — ${f.detail}`)
