@@ -17,12 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sync-engine
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: sync-engine
 
       - name: Checkout prayer-earth (sibling, as deploy-app expects)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Jiansorge/prayer-earth
           path: prayer-earth
