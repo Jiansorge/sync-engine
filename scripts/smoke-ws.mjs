@@ -71,8 +71,12 @@ setTimeout(() => {
   if (!gotState) goal('state broadcast', false)
   if (!gotFeed) goal('feed broadcast', false)
   log(failures === 0 ? 'SMOKE OK' : `SMOKE FAILED (${failures} checks)`)
-  process.exitCode = failures === 0 ? 0 : 1
+  // Force-exit rather than just setting exitCode: some edges never answer the
+  // close frame, so `ws.close()` can leave the event loop (and this process)
+  // alive forever — which hangs whoever spawned us, e.g. deploy-app.mjs's
+  // post-deploy gate and the CI uptime WebSocket check.
   try {
     ws.close()
   } catch {}
+  process.exit(failures === 0 ? 0 : 1)
 }, 3000)

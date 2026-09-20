@@ -68,7 +68,10 @@ export function smokeCheck(url) {
     cwd: ROOT,
     stdio: 'inherit',
     shell: process.platform === 'win32',
-    env: { ...process.env, NODE_OPTIONS: '--experimental-websocket' }
+    env: { ...process.env, NODE_OPTIONS: '--experimental-websocket' },
+    // Hard cap so a wedged smoke client (or a stalled WS handshake) can never
+    // block the deploy gate indefinitely; a timeout counts as a failure.
+    timeout: 30000
   })
   return { ok: r.status === 0, status: r.status }
 }

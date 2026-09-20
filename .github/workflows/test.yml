@@ -14,6 +14,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - name: Install dependencies (retry once for npm optional-bindings bug)
+        run: |
+          npm ci --legacy-peer-deps || {
+            echo "::warning::npm ci failed — clearing node_modules and retrying"
+            rm -rf node_modules
+            npm ci --legacy-peer-deps
+          }
       - name: Protocol + DO integration tests
         run: npm test

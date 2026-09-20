@@ -4,6 +4,16 @@
 # are immutable — a new deploy emits new filenames, so a long-lived cache never
 # serves stale code. index.html and sw.js must revalidate instead.
 
+# Baseline security headers on every asset (defense-in-depth; the Worker sets
+# the same set on the Worker-served app shell via PAGE_HEADERS). Permissions-
+# Policy keeps geolocation for the app itself — the map asks for a coarse fix —
+# while denying microphone/camera.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(self), microphone=(), camera=()
+
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
   X-Content-Type-Options: nosniff

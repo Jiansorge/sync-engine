@@ -73,6 +73,9 @@ const PAGE_HEADERS = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'referrer-policy': 'strict-origin-when-cross-origin',
+  // Allow geolocation for the app itself (the map asks for a coarse fix) but
+  // deny mic/camera; `geolocation=()` would break navigator.geolocation.
+  'permissions-policy': 'geolocation=(self), microphone=(), camera=()',
   'content-security-policy':
     "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; " +
     "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://storage.ko-fi.com; " +
