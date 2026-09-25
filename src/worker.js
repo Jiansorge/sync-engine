@@ -74,11 +74,14 @@ const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, 
 // directly. Hashed /assets/*, /audio/* and icons are served by the assets
 // runtime with their own headers from _headers.
 const PAGE_HEADERS = {
-  // Edge-cache the app shell so repeat visits (and bot/scanner crawls) are
-  // served from the CDN without ever reaching the Worker. max-age lets the
-  // browser hold it briefly; s-maxage is the edge TTL; stale-while-revalidate
-  // keeps the world responsive while a fresh copy is fetched in the background.
-  'cache-control': 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400',
+  // The app shell must ALWAYS revalidate. It is a tiny document whose only job
+  // is to point at the current hashed asset filenames; if the edge caches it
+  // with a long TTL / stale-while-revalidate, a fresh deploy keeps serving the
+  // OLD shell (and thus the old JS) to everyone for up to a day. `no-cache`
+  // makes the edge re-check the Worker on each request, so a deploy's new asset
+  // hashes are picked up immediately. Hashed /assets/* stay `immutable` (below),
+  // so the real performance win — caching the big bundles — is unchanged.
+  'cache-control': 'no-cache',
   'content-type': 'text/html;charset=UTF-8',
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
