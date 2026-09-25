@@ -188,7 +188,14 @@ async function main() {
       run(process.execPath, [path.join(ROOT, 'scripts', 'purge-cache.mjs'), '--paths=/ /health /stats'], { cwd: ROOT, env: process.env })
       ok('edge cache purge (/health + /stats + /)')
     } catch (err) {
-      fail('edge cache purge failed', err && err.message)
+      // Best-effort: a 401 here usually means the deploy token is account-scoped
+      // and lacks Zone>Cache>Purge. That is a cache optimization, NOT a deploy
+      // correctness problem — the live verification below (version contract +
+      // /health + /stats) is the real gate and will catch a genuinely broken
+      // deploy. Do not fail the whole deploy just because the edge still has
+      // a cached shell; the next purge (or cache TTL) will clear it.
+      log('! edge cache purge failed (non-fatal) — continuing to live verification.')
+      log(`  ${err && err.message}`)
     }
   } else {
     log('CF_API_TOKEN not set — skipping edge-cache purge. If /health regresses to')
