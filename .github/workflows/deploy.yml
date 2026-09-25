@@ -47,7 +47,10 @@ jobs:
       - name: Ship (tests → build app → stage → deploy)
         working-directory: sync-engine
         env:
-          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # CF_API_TOKEN: a SEPARATE, zone-scoped token with Zone>Cache>Purge
+          # (the account-scoped CLOUDFLARE_API_TOKEN below cannot purge). If
+          # unset, the purge is skipped with a warning (non-fatal).
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/deploy-app.mjs --no-auth
