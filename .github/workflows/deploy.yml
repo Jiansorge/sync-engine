@@ -5,7 +5,7 @@ name: deploy
 #
 # Required repo secrets:
 #   DEPLOY_PAT            — a fine-grained PAT with Contents:read on Jiansorge/prayer-earth
-#   CLOUDFLARE_API_TOKEN  — Cloudflare token with Workers Scripts:Edit + Workers Routes:Edit
+#   CLOUDFLARE_API_TOKEN  — Cloudflare token with Workers Scripts:Edit + Workers Routes:Edit + Zone:Cache Purge
 #   CLOUDFLARE_ACCOUNT_ID — the Cloudflare account id
 on:
   repository_dispatch:
@@ -38,7 +38,7 @@ jobs:
 
       - name: Install sync-engine deps
         working-directory: sync-engine
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
       - name: Install prayer-earth deps
         working-directory: prayer-earth
@@ -47,6 +47,7 @@ jobs:
       - name: Ship (tests → build app → stage → deploy)
         working-directory: sync-engine
         env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/deploy-app.mjs --no-auth

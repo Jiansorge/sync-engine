@@ -174,7 +174,28 @@ async function main() {
   }
   ok('deploy')
 
-  // 6. Verify — the site must answer as the WORKER, not the static assets
+  // 6. Purge the edge cache for the Worker-first paths BEFORE verifying. The
+  //    verification below hits them "fresh" (bypasses the edge), but a cached
+  //    SPA HTML shell from when static assets were answering /health + /stats
+  //    keeps being served to the real uptime probe (cache=HIT) no matter how
+  //    correct run_worker_first is — that is exactly the "assets fallback?"
+  //    uptime regression. run_worker_first fixes routing; only a purge makes
+  //    the edge actually give up the stale shell. Requires the separate
+  //    Zone>Cache>Purge token (CF_API_TOKEN); skipped with a warning if unset.
+  if (process.env.CF_API_TOKEN) {
+    log('Purging edge cache for /, /health, /stats…')
+    try {
+      run(process.execPath, [path.join(ROOT, 'scripts', 'purge-cache.mjs'), '--paths=/ /health /stats'], { cwd: ROOT, env: process.env })
+      ok('edge cache purge (/health + /stats + /)')
+    } catch (err) {
+      fail('edge cache purge failed', err && err.message)
+    }
+  } else {
+    log('CF_API_TOKEN not set — skipping edge-cache purge. If /health regresses to')
+    log('SPA HTML (cache=HIT), run `npm run cache:purge` before re-deploying.')
+  }
+
+  // 7. Verify — the site must answer as the WORKER, not the static assets
   //    fallback. The failure mode we protect against: after a bad deploy the
   //    Worker stops getting requests and /health + /stats return the SPA HTML
   //    instead of JSON (and WebSocket upgrades hand back HTML, never 101). We

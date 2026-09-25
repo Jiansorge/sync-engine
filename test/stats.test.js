@@ -9,7 +9,7 @@ import {
 
 describe('dayKey', () => {
   it('formats YYYY-MM-DD with zero padding', () => {
-    expect(dayKey(new Date(2026, 0, 5))).toBe('2026-01-05')
+    expect(dayKey(new Date(Date.UTC(2026, 0, 5)))).toBe('2026-01-05')
   })
 })
 
@@ -124,12 +124,23 @@ describe('sanitizeStats', () => {
       unknownFutureKey: 'should be dropped'
     }
     const clean = sanitizeStats(dirty)
-    expect(clean.prayerCompletions).toEqual({ a: 3, ok: 2.5 })
+    expect(clean.prayerCompletions).toEqual({ a: 3 })
     expect(clean.prayerDayCompletions).toEqual({ '2026-01-01': { a: 1 } })
     expect(clean.prayerDayStats).toEqual({ '2026-01-01': { b: 0 } })
     expect(clean.localPrayerSeconds).toBe(42)
     expect(clean.streak).toBeUndefined()
     expect(clean.bestStreak).toBe(7)
+    expect(clean.lastPrayedDay).toBeUndefined()
+  })
+
+  it('drops impossible calendar days and negative counters', () => {
+    const clean = sanitizeStats({
+      prayerCompletions: { bad: -1, worse: 1.5, good: 2 },
+      prayerDayCompletions: { '2026-02-31': { a: 1 }, '2026-02-28': { b: 1 } },
+      lastPrayedDay: '2026-02-31'
+    })
+    expect(clean.prayerCompletions).toEqual({ good: 2 })
+    expect(clean.prayerDayCompletions).toEqual({ '2026-02-28': { b: 1 } })
     expect(clean.lastPrayedDay).toBeUndefined()
     expect(clean.unknownFutureKey).toBeUndefined()
   })

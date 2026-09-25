@@ -29,12 +29,22 @@ const MAX_SYNC_STATS = 250000 // serialized size of a `sync` stats blob
 const MAX_FEED = 40 // live feed window, bounded
 const MAX_SEEN = 20000 // eager anonSeen prune only above this size (else on alarm)
 const MAX_TOTALS_KEYS = 1000 // ceiling on distinct durable prayer/spirit ids
+const MAX_RECENT_STARTS = 10000
+const RECENT_START_TTL_MS = 7 * 86400000
 // Keys a hostile client could abuse against plain-object maps. prayerId/spiritId
 // are client-supplied strings and are used directly as keys in the durable
 // totals — reject the prototype trio so totals can't be poisoned with string
 // values or a polluted prototype.
 const DANGEROUS = new Set(['__proto__', 'constructor', 'prototype'])
 const safeKey = (k) => typeof k === 'string' && k.length > 0 && !DANGEROUS.has(k)
+const safeStoredCounts = (value) => {
+  const out = {}
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out
+  for (const [key, count] of Object.entries(value)) {
+    if (safeKey(key) && Number.isSafeInteger(count) && count >= 0) out[key] = count
+  }
+  return out
+}
 const DEFAULTS = {
   maxMsgPerSec: 20, // per-connection message budget
   stateDebounceMs: 150, // broadcastState coalescing window
@@ -201,6 +211,7 @@ export class Coordinator extends DurableObject {
     super(ctx, env)
     this._cache = null
     this._cacheAt = 0
+    this._inflight = null
     this._startAt = Date.now()
     this._freshAt = 0
   }
@@ -236,34 +247,43 @@ export class Coordinator extends DurableObject {
     if (fresh) this._freshAt = now
     if (!fresh && this._cache && now - this._cacheAt < ttl) return json(this._cache)
 
-    const n = shardCount(this.env)
-    const summaries = []
-    let errors = 0
-    await Promise.all(
-      allShardNames(n).map(async (name) => {
-        try {
-          const stub = this.env.SYNC_ROOM.get(this.env.SYNC_ROOM.idFromName(name))
-          const res = await stub.fetch('https://shard/summary')
-          if (res.ok) summaries.push(await res.json())
-          else {
+    const load = async () => {
+      const n = shardCount(this.env)
+      const summaries = []
+      let errors = 0
+      await Promise.all(
+        allShardNames(n).map(async (name) => {
+          try {
+            const stub = this.env.SYNC_ROOM.get(this.env.SYNC_ROOM.idFromName(name))
+            const res = await stub.fetch('https://shard/summary')
+            if (res.ok) summaries.push(await res.json())
+            else {
+              errors++
+              console.error(`sync-engine: shard ${name} summary returned ${res.status}`)
+            }
+          } catch (err) {
             errors++
-            console.error(`sync-engine: shard ${name} summary returned ${res.status}`)
+            console.error(`sync-engine: shard ${name} summary failed`, err && err.message)
           }
-        } catch (err) {
-          errors++
-          console.error(`sync-engine: shard ${name} summary failed`, err && err.message)
-        }
-      })
-    )
+        })
+      )
 
-    const merged = mergeSummaries(summaries)
-    merged.generatedAt = now
-    merged.shards = n
-    merged.errors = errors
-    merged.schema = 1
-    this._cache = merged
-    this._cacheAt = now
-    return json(merged)
+      const merged = mergeSummaries(summaries)
+      merged.generatedAt = Date.now()
+      merged.shards = n
+      merged.errors = errors
+      merged.schema = 1
+      this._cache = merged
+      this._cacheAt = Date.now()
+      return json(merged)
+    }
+    if (this._inflight) return this._inflight
+    this._inflight = load()
+    try {
+      return await this._inflight
+    } finally {
+      this._inflight = null
+    }
   }
 }
 
@@ -286,10 +306,12 @@ export class SyncRoom extends DurableObject {
     this._secondsDirty = false
     this._seenDirty = false
     this._countsDirty = false
+    this._startsDirty = false
     this._loaded = false
     this._totals = null
     this._totalSeconds = 0
     this._anonSeen = new Map() // anonId -> last active day (YYYY-MM-DD)
+    this._recentStarts = new Map()
     this._counts = null
     this._budgets = new WeakMap() // ws -> { rate, rateStart } (budgets every message)
     this._syncAt = new WeakMap() // ws -> last processed sync timestamp (rate-caps sync even pre-presence)
@@ -297,6 +319,7 @@ export class SyncRoom extends DurableObject {
     this._stateTimer = null
     this._feedTimer = null
     this._persistTimer = null
+    this._flushPromise = null
     this._lastAccum = null
     this._lastPrune = 0
     this._lastBackup = 0
@@ -309,6 +332,19 @@ export class SyncRoom extends DurableObject {
       const pair = new WebSocketPair()
       const [client, server] = Object.values(pair)
       this.ctx.acceptWebSocket(server)
+      this.sessions.set(server, {
+        name: 'Someone',
+        prayerId: null,
+        spiritId: null,
+        cell: null,
+        lastSeen: Date.now(),
+        lastSyncAt: 0,
+        lastStartAt: 0,
+        sessionId: ''
+      })
+      try {
+        server.serializeAttachment(this.sessions.get(server))
+      } catch {}
       this.armSweep()
       // The greeting is best-effort: a storage hiccup must never fail the
       // handshake itself (the client still gets 101 + a state on its next
@@ -401,8 +437,12 @@ export class SyncRoom extends DurableObject {
   }
 
   async webSocketClose(ws) {
-    if (this.sessions.delete(ws)) this._markStateDirty()
-    this.armSweep()
+    try {
+      if (this.sessions.delete(ws)) this._markStateDirty()
+      await this._flushStorage()
+    } finally {
+      this.armSweep()
+    }
   }
 
   // ---- presence / sync ----
@@ -422,6 +462,10 @@ export class SyncRoom extends DurableObject {
         cell = gridKey(la, loN)
       }
     }
+    const sessionId =
+      typeof msg.sessionId === 'string' && msg.sessionId.length <= 80 && safeKey(msg.sessionId)
+        ? msg.sessionId
+        : ''
     const session = {
       name: (
         typeof msg.name === 'string' && msg.name.trim()
@@ -433,7 +477,8 @@ export class SyncRoom extends DurableObject {
       cell,
       lastSeen: Date.now(),
       lastSyncAt: 0,
-      lastStartAt: prev ? prev.lastStartAt : 0
+      lastStartAt: prev ? prev.lastStartAt : 0,
+      sessionId
     }
     this.sessions.set(ws, session)
     await this._bump('presence')
@@ -454,10 +499,16 @@ export class SyncRoom extends DurableObject {
       msg.praying &&
       session.prayerId &&
       (!prev || session.prayerId !== prev.prayerId) &&
-      now - session.lastStartAt >= startMin
+      now - session.lastStartAt >= startMin &&
+      (!sessionId || !this._recentStarts.has(sessionId))
 
     if (isNewStart) {
       session.lastStartAt = now
+      if (sessionId) {
+        this._recentStarts.set(sessionId, now)
+        this._pruneRecentStarts(now)
+        this._startsDirty = true
+      }
       if (safeKey(session.prayerId) && Object.keys(this._totals.prayers).length < MAX_TOTALS_KEYS) {
         this._totals.prayers[session.prayerId] = (this._totals.prayers[session.prayerId] || 0) + 1
       }
@@ -669,6 +720,7 @@ export class SyncRoom extends DurableObject {
       if (now - s.lastSeen > ttl) stale.push(ws)
     }
     for (const ws of stale) this._closeSocket(ws)
+    if (stale.length) this._markStateDirty()
     return stale.length
   }
 
@@ -684,26 +736,54 @@ export class SyncRoom extends DurableObject {
   }
 
   async _flushStorage() {
-    // Never persist unloaded fallback state: writing zeroed totals over the
-    // real durable data after a failed read would lose data permanently.
-    if (!this._loaded) return
-    const jobs = []
-    if (this._totalsDirty) jobs.push(this.ctx.storage.put('totals', { ...this._totals }))
-    if (this._secondsDirty) jobs.push(this.ctx.storage.put('totalPrayerSeconds', this._totalSeconds))
-    if (this._seenDirty) jobs.push(this.ctx.storage.put('anonSeen', Array.from(this._anonSeen.entries())))
-    if (this._countsDirty) jobs.push(this.ctx.storage.put('counts', this._counts))
-    if (jobs.length) {
+    if (this._flushPromise) return this._flushPromise
+    this._flushPromise = (async () => {
+      if (!this._loaded) return
+      const jobs = []
+      const totalsDirty = this._totalsDirty
+      const secondsDirty = this._secondsDirty
+      const seenDirty = this._seenDirty
+      const countsDirty = this._countsDirty
+      const startsDirty = this._startsDirty
+      if (totalsDirty) {
+        this._totalsDirty = false
+        jobs.push(this.ctx.storage.put('totals', { ...this._totals }))
+      }
+      if (secondsDirty) {
+        this._secondsDirty = false
+        jobs.push(this.ctx.storage.put('totalPrayerSeconds', this._totalSeconds))
+      }
+      if (seenDirty) {
+        this._seenDirty = false
+        jobs.push(this.ctx.storage.put('anonSeen', Array.from(this._anonSeen.entries())))
+      }
+      if (countsDirty) {
+        this._countsDirty = false
+        jobs.push(this.ctx.storage.put('counts', { ...this._counts }))
+      }
+      if (startsDirty) {
+        this._startsDirty = false
+        jobs.push(
+          this.ctx.storage.put('recentStarts', Array.from(this._recentStarts.entries()))
+        )
+      }
+      if (!jobs.length) return
       try {
         await Promise.all(jobs)
-        // Only clear the flags after the writes resolve: a transient rejection
-        // must not lose those counts (clearing first would mark them flushed).
-        this._totalsDirty = false
-        this._secondsDirty = false
-        this._seenDirty = false
-        this._countsDirty = false
       } catch (err) {
+        if (totalsDirty) this._totalsDirty = true
+        if (secondsDirty) this._secondsDirty = true
+        if (seenDirty) this._seenDirty = true
+        if (countsDirty) this._countsDirty = true
+        if (startsDirty) this._startsDirty = true
         console.error('sync-engine: storage flush failed', err && err.message)
       }
+    })()
+    try {
+      await this._flushPromise
+    } finally {
+      this._flushPromise = null
+      if (this._hasPendingWrites()) this._schedulePersist()
     }
   }
 
@@ -716,17 +796,27 @@ export class SyncRoom extends DurableObject {
           'totals',
           'totalPrayerSeconds',
           'anonSeen',
+          'recentStarts',
           'schema',
           'counts'
         ])
         if (!got.get('schema')) await this.ctx.storage.put('schema', { v: 1 })
-        this._totals = got.get('totals') || { prayers: {}, spirits: {}, updatedAt: Date.now() }
-        if (!this._totals.updatedAt) this._totals.updatedAt = Date.now()
+        const storedTotals = got.get('totals') || {}
+        this._totals = {
+          prayers: safeStoredCounts(storedTotals.prayers),
+          spirits: safeStoredCounts(storedTotals.spirits),
+          updatedAt: Number.isFinite(storedTotals.updatedAt) ? storedTotals.updatedAt : Date.now()
+        }
         this._totalSeconds =
           typeof got.get('totalPrayerSeconds') === 'number' ? got.get('totalPrayerSeconds') : 0
         this._anonSeen = new Map(Array.isArray(got.get('anonSeen')) ? got.get('anonSeen') : [])
+        const recentStarts = Array.isArray(got.get('recentStarts')) ? got.get('recentStarts') : []
+        this._recentStarts = new Map(recentStarts)
+        this._pruneRecentStarts(Date.now())
+        this._startsDirty = this._recentStarts.size !== recentStarts.length
         this._counts = { ...EMPTY_COUNTS(), ...(got.get('counts') || {}) }
         this._loaded = true
+        if (this._startsDirty) this._schedulePersist()
       } catch {
         // Keep in-memory fallbacks so callers never crash, but leave _loaded
         // false and clear the promise so the NEXT call retries the read. If we
@@ -735,6 +825,7 @@ export class SyncRoom extends DurableObject {
         // data loss.
         if (!this._totals) this._totals = { prayers: {}, spirits: {}, updatedAt: Date.now() }
         if (!this._anonSeen) this._anonSeen = new Map()
+        if (!this._recentStarts) this._recentStarts = new Map()
         if (!this._counts) this._counts = EMPTY_COUNTS()
       } finally {
         this._loadPromise = null
@@ -774,22 +865,29 @@ export class SyncRoom extends DurableObject {
   _activeCounts(anonSeen) {
     const now = new Date()
     const todayKey = dayKey(now)
-    const week = new Date(now)
-    week.setDate(now.getDate() - 7)
-    const weekKey = dayKey(week)
+    const weekKey = dayKey(new Date(now.getTime() - 6 * 86400000))
     let today = 0
     let weekCount = 0
     for (const day of anonSeen.values()) {
-      if (day >= todayKey) today += 1
-      if (day >= weekKey) weekCount += 1
+      if (day === todayKey) today += 1
+      if (day >= weekKey && day <= todayKey) weekCount += 1
     }
     return { today, week: weekCount }
   }
 
+  _pruneRecentStarts(now = Date.now()) {
+    const cutoff = now - RECENT_START_TTL_MS
+    for (const [id, at] of this._recentStarts) {
+      if (!Number.isFinite(at) || at < cutoff) this._recentStarts.delete(id)
+    }
+    while (this._recentStarts.size > MAX_RECENT_STARTS) {
+      const oldest = this._recentStarts.keys().next().value
+      this._recentStarts.delete(oldest)
+    }
+  }
+
   _pruneSeen(force) {
-    const week = new Date()
-    week.setDate(week.getDate() - 7)
-    const weekKey = dayKey(week)
+    const weekKey = dayKey(new Date(Date.now() - 6 * 86400000))
     // Eager prune only when the map grows large; otherwise the alarm flushes it
     // (keeps per-sync cost O(1) for a busy DO).
     if (!force && this._anonSeen.size < MAX_SEEN) return
@@ -837,7 +935,13 @@ export class SyncRoom extends DurableObject {
 
   // ---- alarm: periodic sweep + flush ----
   _hasPendingWrites() {
-    return this._totalsDirty || this._secondsDirty || this._seenDirty || this._countsDirty
+    return (
+      this._totalsDirty ||
+      this._secondsDirty ||
+      this._seenDirty ||
+      this._countsDirty ||
+      this._startsDirty
+    )
   }
 
   // Arm (or disarm) the periodic sweep alarm. Crucially, this never resets an
@@ -865,7 +969,8 @@ export class SyncRoom extends DurableObject {
   async _backup() {
     const kv = this.env.TOTALS_BACKUP
     if (!kv) return
-    await this._ensureLoaded() // _totals is null until loaded — never read it cold
+    await this._ensureLoaded()
+    if (!this._loaded) return
     try {
       const name = this.ctx.id.name || 'shard'
       await kv.put(

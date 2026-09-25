@@ -2,8 +2,8 @@
 // and the vitest suite. No runtime dependencies so they run anywhere.
 
 export function dayKey(d = new Date()) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
-    d.getDate()
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    d.getUTCDate()
   ).padStart(2, '0')}`
 }
 
@@ -13,12 +13,17 @@ export function dayKey(d = new Date()) {
 // so legit UTC+14 users are never dropped.
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/
 const maxValidDay = () => dayKey(new Date(Date.now() + 86400000))
+const validDay = (d) => {
+  if (typeof d !== 'string' || !DAY_RE.test(d)) return false
+  const parsed = new Date(`${d}T00:00:00.000Z`)
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === d
+}
 
 // The last day a synced device actually prayed, derived from the anonymous
 // lifetime stats. Returns a `YYYY-MM-DD` string or null.
 export function activeDayFromStats(stats) {
   const maxDay = maxValidDay()
-  const okDay = (d) => typeof d === 'string' && DAY_RE.test(d) && d <= maxDay
+  const okDay = (d) => validDay(d) && d <= maxDay
   const days = []
   if (okDay(stats?.lastPrayedDay)) days.push(stats.lastPrayedDay)
   for (const d of Object.keys(stats?.prayerDayCompletions || {})) {
@@ -35,21 +40,22 @@ export function activeDayFromStats(stats) {
 // non-numeric value (e.g. a string or object) would produce NaN that persists
 // durably forever. Only finite numbers (or plain maps of finite numbers) pass.
 const DANGEROUS = new Set(['__proto__', 'constructor', 'prototype'])
-const finiteNum = (v) => typeof v === 'number' && Number.isFinite(v)
+const counter = (v) => Number.isSafeInteger(v) && v >= 0
 const cleanMap = (map) => {
   const out = {}
   for (const [k, v] of Object.entries(map || {})) {
-    if (DANGEROUS.has(k)) continue
-    if (!finiteNum(v)) continue
+    if (DANGEROUS.has(k) || typeof k !== 'string' || k.length > 100) continue
+    if (!counter(v)) continue
     out[k] = v
+    if (Object.keys(out).length >= 1000) break
   }
   return out
 }
 const cleanDayMap = (map) => {
   const out = {}
-  for (const [d, m] of Object.entries(map || {})) {
-    if (DANGEROUS.has(d)) continue
-    const cleaned = cleanMap(m)
+  for (const d of Object.keys(map || {}).sort().slice(-62)) {
+    if (DANGEROUS.has(d) || !validDay(d) || d > maxValidDay()) continue
+    const cleaned = cleanMap(map[d])
     if (Object.keys(cleaned).length) out[d] = cleaned
   }
   return out
@@ -62,9 +68,9 @@ export function sanitizeStats(stats) {
     if (k === 'prayerCompletions') out[k] = cleanMap(v)
     else if (k === 'prayerDayCompletions' || k === 'prayerDayStats') out[k] = cleanDayMap(v)
     else if (k === 'localPrayerSeconds' || k === 'streak' || k === 'bestStreak') {
-      if (finiteNum(v)) out[k] = v
+      if (counter(v)) out[k] = v
     } else if (k === 'lastPrayedDay') {
-      if (typeof v === 'string') out[k] = v
+      if (validDay(v) && v <= maxValidDay()) out[k] = v
     }
     // unknown keys are dropped entirely
   }
@@ -79,9 +85,13 @@ export function hasLifetimeStats(s) {
   if ((s.localPrayerSeconds || 0) > 0) return true
   if ((s.streak || 0) > 0 || (s.bestStreak || 0) > 0) return true
   if (s.lastPrayedDay) return true
-  if (s.prayerCompletions && Object.keys(s.prayerCompletions).length) return true
-  if (s.prayerDayCompletions && Object.keys(s.prayerDayCompletions).length) return true
-  if (s.prayerDayStats && Object.keys(s.prayerDayStats).length) return true
+  const hasPositive = (map) =>
+    Object.values(map || {}).some((v) => Number.isFinite(v) && v > 0)
+  if (s.prayerCompletions && hasPositive(s.prayerCompletions)) return true
+  if (s.prayerDayCompletions && Object.values(s.prayerDayCompletions || {}).some(hasPositive)) {
+    return true
+  }
+  if (s.prayerDayStats && Object.values(s.prayerDayStats || {}).some(hasPositive)) return true
   return false
 }
 

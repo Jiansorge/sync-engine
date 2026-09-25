@@ -316,6 +316,50 @@ describe('SyncRoom over the wire', () => {
     })
   })
 
+  it('deduplicates the same playback session across reconnects', async () => {
+    const cell = freshCell()
+    const stub = env.SYNC_ROOM.get(shardId(cell))
+    await runInDurableObject(stub, async (instance) => {
+      await instance.onPresence({}, {
+        praying: true,
+        prayerId: 'reconnect-prayer',
+        spiritId: 'test-spirit',
+        sessionId: 'playback-123',
+        name: 'Reconnect',
+        cell: '0,0'
+      })
+      await instance.onPresence({}, {
+        praying: true,
+        prayerId: 'reconnect-prayer',
+        spiritId: 'test-spirit',
+        sessionId: 'playback-123',
+        name: 'Reconnect',
+        cell: '0,0'
+      })
+      expect(instance._totals.prayers['reconnect-prayer']).toBe(1)
+      expect(instance._totals.spirits['test-spirit']).toBe(1)
+    })
+  })
+
+  it('persists recent playback ids used for restart deduplication', async () => {
+    const cell = freshCell()
+    const stub = env.SYNC_ROOM.get(shardId(cell))
+    await runInDurableObject(stub, async (instance) => {
+      await instance.onPresence({}, {
+        praying: true,
+        prayerId: 'durable-prayer',
+        spiritId: 'test-spirit',
+        sessionId: 'durable-playback',
+        name: 'Durable',
+        cell: '0,0'
+      })
+      await instance._flushStorage()
+      expect(await instance.ctx.storage.get('recentStarts')).toEqual([
+        ['durable-playback', expect.any(Number)]
+      ])
+    })
+  })
+
   it('rate-caps sync per socket even without presence (no storage-write flood)', async () => {
     const ws = await openWs(freshCell())
     const seen = watch(ws)

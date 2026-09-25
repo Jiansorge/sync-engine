@@ -13,6 +13,13 @@
 const ZONE_NAME = process.env.CF_ZONE_NAME || 'joining-palms.app'
 const TOKEN = process.env.CF_API_TOKEN
 const ALL = process.argv.includes('--all')
+// Explicit URL paths (e.g. --paths="/health /stats /"). Purges only those files,
+// used by the deploy gate after a routing change so a stale cached SPA HTML shell
+// can never keep answering /health + /stats instead of Worker JSON.
+const pathsArg = process.argv.find((a) => a.startsWith('--paths='))
+const PATHS = pathsArg
+  ? pathsArg.slice('--paths='.length).split(' ').filter(Boolean).map((p) => `https://${ZONE_NAME}${p}`)
+  : []
 
 if (!TOKEN) {
   console.error('Set CF_API_TOKEN (a token with Zone > Cache > Purge).')
@@ -41,7 +48,7 @@ if (!zone) {
 
 const body = ALL
   ? { purge_everything: true }
-  : { files: [`https://${ZONE_NAME}/audio/*`] }
+  : { files: PATHS.length ? PATHS : [`https://${ZONE_NAME}/audio/*`] }
 
 const res = await api(`/zones/${zone.id}/purge_cache`, { method: 'POST', body: JSON.stringify(body) })
 console.log(ALL ? 'Purged the entire zone cache.' : `Purged /audio/* on ${ZONE_NAME}.`)
