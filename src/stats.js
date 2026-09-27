@@ -66,7 +66,12 @@ export function sanitizeStats(stats) {
   for (const [k, v] of Object.entries(stats)) {
     if (DANGEROUS.has(k)) continue
     if (k === 'prayerCompletions') out[k] = cleanMap(v)
-    else if (k === 'prayerDayCompletions' || k === 'prayerDayStats') out[k] = cleanDayMap(v)
+    else if (k === 'prayerDayCompletions') out[k] = cleanDayMap(v)
+    // prayerDayStats is intentionally NOT stored server-side: it is unused for
+    // any functional decision (active-day checks read prayerDayCompletions +
+    // lastPrayedDay) and dominated the sync frame size. The client keeps it
+    // locally. hasLifetimeStats stays correct because localPrayerSeconds and
+    // prayerDayCompletions always accompany it.
     else if (k === 'localPrayerSeconds' || k === 'streak' || k === 'bestStreak') {
       if (counter(v)) out[k] = v
     } else if (k === 'lastPrayedDay') {

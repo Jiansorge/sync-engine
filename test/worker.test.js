@@ -91,24 +91,22 @@ describe('SyncRoom over the wire', () => {
     // Regression: the old guard (`length < MAX` with no eviction) let an
     // attacker fill the bucket with ~1000 junk prayerIds and permanently wedge
     // all prayer counting. _countTotal must evict-and-insert so a real prayer
-    // can always be counted again, and the bucket stays bounded.
+    // can always be counted again, the bucket stays bounded, AND (smallest-count
+    // eviction) real, high-count prayers are never the thing that gets erased.
     const cell = freshCell()
     const stub = env.SYNC_ROOM.get(shardId(cell))
     const result = await runInDurableObject(stub, async (instance) => {
-      // Initialize totals directly so we exercise _countTotal's logic without
-      // depending on async boot ordering.
       instance._totals = instance._totals || { prayers: {}, spirits: {} }
-      for (let i = 0; i < 1000; i++) instance._countTotal('prayers', `junk-${i}`)
-      const beforeKeys = Object.keys(instance._totals.prayers).length
-      // The bucket is full; a real prayer must still be countable.
-      instance._countTotal('prayers', 'mani')
+      // A real prayer with a healthy all-time count.
+      for (let i = 0; i < 50; i++) instance._countTotal('prayers', 'mani')
+      // Then flood with junk ids (each lands at 1).
+      for (let i = 0; i < 1200; i++) instance._countTotal('prayers', `junk-${i}`)
       const mani = instance._totals.prayers.mani
-      const afterKeys = Object.keys(instance._totals.prayers).length
-      return { beforeKeys, mani, afterKeys }
+      const keys = Object.keys(instance._totals.prayers).length
+      return { mani, keys }
     })
-    expect(result.beforeKeys).toBe(1000)
-    expect(result.mani).toBe(1) // real prayer counted despite a full bucket
-    expect(result.afterKeys).toBe(1000) // still bounded (evicted one to make room)
+    expect(result.mani).toBe(50) // real high-count prayer survived the junk flood
+    expect(result.keys).toBe(1000) // bucket stayed bounded
   })
 
   it('falls back to static assets for /audio/* when R2 is not bound', async () => {

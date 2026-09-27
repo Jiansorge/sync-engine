@@ -75,7 +75,8 @@ export function mergeStats(base, incoming) {
     out.prayerCompletions[k] = pick(out.prayerCompletions[k], v)
   }
   out.prayerDayCompletions = mergeDay(base?.prayerDayCompletions, incoming.prayerDayCompletions)
-  out.prayerDayStats = mergeDay(base?.prayerDayStats, incoming.prayerDayStats)
+  // prayerDayStats is not stored or synced server-side (unused functionally and
+  // it dominated the frame size). The client keeps it locally.
   out.localPrayerSeconds = pick(base?.localPrayerSeconds, incoming.localPrayerSeconds)
   out.streak = streakFromDays(out.prayerDayCompletions)
   out.bestStreak = Math.max(pick(base?.bestStreak, incoming.bestStreak), out.streak)

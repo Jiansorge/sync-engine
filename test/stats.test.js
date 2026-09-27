@@ -126,7 +126,9 @@ describe('sanitizeStats', () => {
     const clean = sanitizeStats(dirty)
     expect(clean.prayerCompletions).toEqual({ a: 3 })
     expect(clean.prayerDayCompletions).toEqual({ '2026-01-01': { a: 1 } })
-    expect(clean.prayerDayStats).toEqual({ '2026-01-01': { b: 0 } })
+    // prayerDayStats is intentionally not stored server-side (it dominated the
+    // sync frame and is unused functionally); the client keeps it locally.
+    expect(clean.prayerDayStats).toBeUndefined()
     expect(clean.localPrayerSeconds).toBe(42)
     expect(clean.streak).toBeUndefined()
     expect(clean.bestStreak).toBe(7)
