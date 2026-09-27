@@ -73,12 +73,18 @@ jobs:
         if: steps.health.outputs.ok == 'no' || steps.ws.outputs.ws_ok == 'no' || steps.contract.outputs.contract_ok == 'no'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Pass step outputs through the environment, never interpolate them
+          # into the run: script text — `detail` embeds the remote /health body,
+          # so direct interpolation is a script-injection sink.
+          HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
+          WS_OK: ${{ steps.ws.outputs.ws_ok }}
+          CONTRACT_OK: ${{ steps.contract.outputs.contract_ok }}
         run: |
-          detail="${{ steps.health.outputs.detail }}"
-          if [ "${{ steps.ws.outputs.ws_ok }}" = "no" ]; then
+          detail="$HEALTH_DETAIL"
+          if [ "$WS_OK" = "no" ]; then
             if [ -n "$detail" ]; then detail="$detail; websocket smoke failed"; else detail="websocket smoke failed"; fi
           fi
-          if [ "${{ steps.contract.outputs.contract_ok }}" = "no" ]; then
+          if [ "$CONTRACT_OK" = "no" ]; then
             if [ -n "$detail" ]; then detail="$detail; live version violates Worker contract"; else detail="live version violates Worker contract"; fi
           fi
           exists=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label uptime --json number -q '.[0].number' 2>/dev/null || true)

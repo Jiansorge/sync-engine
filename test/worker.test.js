@@ -87,6 +87,30 @@ describe('SyncRoom over the wire', () => {
     ws.close()
   })
 
+  it('totals bucket self-heals instead of freezing when flooded with junk ids', async () => {
+    // Regression: the old guard (`length < MAX` with no eviction) let an
+    // attacker fill the bucket with ~1000 junk prayerIds and permanently wedge
+    // all prayer counting. _countTotal must evict-and-insert so a real prayer
+    // can always be counted again, and the bucket stays bounded.
+    const cell = freshCell()
+    const stub = env.SYNC_ROOM.get(shardId(cell))
+    const result = await runInDurableObject(stub, async (instance) => {
+      // Initialize totals directly so we exercise _countTotal's logic without
+      // depending on async boot ordering.
+      instance._totals = instance._totals || { prayers: {}, spirits: {} }
+      for (let i = 0; i < 1000; i++) instance._countTotal('prayers', `junk-${i}`)
+      const beforeKeys = Object.keys(instance._totals.prayers).length
+      // The bucket is full; a real prayer must still be countable.
+      instance._countTotal('prayers', 'mani')
+      const mani = instance._totals.prayers.mani
+      const afterKeys = Object.keys(instance._totals.prayers).length
+      return { beforeKeys, mani, afterKeys }
+    })
+    expect(result.beforeKeys).toBe(1000)
+    expect(result.mani).toBe(1) // real prayer counted despite a full bucket
+    expect(result.afterKeys).toBe(1000) // still bounded (evicted one to make room)
+  })
+
   it('falls back to static assets for /audio/* when R2 is not bound', async () => {
     // No AUDIO_BUCKET binding in the test env → /audio/* must route to ASSETS
     // (404 for a missing file) instead of crashing.

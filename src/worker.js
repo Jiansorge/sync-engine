@@ -384,6 +384,12 @@ export class SyncRoom extends DurableObject {
 
   // ---- hibernation API ----
   async webSocketMessage(ws, raw) {
+    // Per-connection rate budget, charged FIRST so every inbound frame counts —
+    // including oversize frames that are rejected below before any other
+    // accounting. (When the length check ran first, a flood of >MAX_WS_MSG
+    // frames was unmetered and bypassed the anti-flood control entirely.)
+    if (this._overBudget(ws)) return
+
     if (typeof raw !== 'string') {
       try {
         raw = new TextDecoder('utf-8').decode(raw)
@@ -391,7 +397,11 @@ export class SyncRoom extends DurableObject {
         return
       }
     }
-    if (raw.length > MAX_WS_MSG) return
+    if (raw.length > MAX_WS_MSG) {
+      this._send(ws, JSON.stringify({ type: E_ERROR, code: 'too-large' }))
+      this._closeSocket(ws)
+      return
+    }
 
     let msg
     try {
@@ -414,12 +424,6 @@ export class SyncRoom extends DurableObject {
       } catch {}
     }
     if (sess) sess.lastSeen = Date.now()
-
-    // Per-connection rate budget. Applied to every message from any socket
-    // (not just those that have sent presence). A connection over its budget is
-    // closed — legit clients send a handful of messages per minute, so 20/s is
-    // generous and only floods trip it.
-    if (this._overBudget(ws)) return
 
     await this._bump('messages')
     try {
@@ -446,6 +450,26 @@ export class SyncRoom extends DurableObject {
     } finally {
       this.armSweep()
     }
+  }
+
+  // Bounded, self-healing insert into a totals bucket. The previous guard was
+  // `Object.keys(...).length < MAX_TOTALS_KEYS` with NO eviction: an attacker who
+  // sent ~1000 distinct junk `prayerId`s (one socket, ~17 min) filled the bucket
+  // and froze ALL prayer counting for the lifetime of the Durable Object's
+  // storage — a permanent, silent, irreversible kill of the product's core
+  // metric. Instead, when a bucket is full and a genuinely new id arrives, we
+  // evict the oldest-inserted key (plain-object string keys keep insertion
+  // order) and insert the new one. That keeps the bucket bounded AND lets real
+  // prayers re-earn their slot on the next start, so it can never wedge.
+  _countTotal(bucket, key) {
+    if (!safeKey(key)) return
+    if (!this._totals || !this._totals[bucket]) return
+    const map = this._totals[bucket]
+    if (map[key] === undefined && Object.keys(map).length >= MAX_TOTALS_KEYS) {
+      const oldest = Object.keys(map)[0]
+      if (oldest !== undefined) delete map[oldest]
+    }
+    map[key] = (map[key] || 0) + 1
   }
 
   // ---- presence / sync ----
@@ -512,11 +536,9 @@ export class SyncRoom extends DurableObject {
         this._pruneRecentStarts(now)
         this._startsDirty = true
       }
-      if (safeKey(session.prayerId) && Object.keys(this._totals.prayers).length < MAX_TOTALS_KEYS) {
-        this._totals.prayers[session.prayerId] = (this._totals.prayers[session.prayerId] || 0) + 1
-      }
-      if (session.spiritId && safeKey(session.spiritId) && Object.keys(this._totals.spirits).length < MAX_TOTALS_KEYS) {
-        this._totals.spirits[session.spiritId] = (this._totals.spirits[session.spiritId] || 0) + 1
+      this._countTotal('prayers', session.prayerId)
+      if (session.spiritId && safeKey(session.spiritId)) {
+        this._countTotal('spirits', session.spiritId)
       }
       this._totals.updatedAt = now
       this._totalsDirty = true

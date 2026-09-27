@@ -27,6 +27,18 @@ describe('allowOrigin', () => {
     expect(allowOrigin('https://anything.dev', '')).toBe(true)
     expect(allowOrigin(null, undefined)).toBe(true)
   })
+
+  it('never allow-lists opaque origins (cross-site WS hijack guard)', () => {
+    // A single opaque entry must not collapse to "null" and match every opaque
+    // origin (sandboxed iframes, file://, data:, about:blank all send "null").
+    const withOpaque = 'https://prayer.earth,capacitor://localhost'
+    expect(allowOrigin('null', withOpaque)).toBe(false)
+    expect(allowOrigin('file:///tmp/evil.html', withOpaque)).toBe(false)
+    expect(allowOrigin('app://evil', withOpaque)).toBe(false)
+    expect(allowOrigin('capacitor://evil-host', withOpaque)).toBe(false)
+    // ...while genuine listed origins still work.
+    expect(allowOrigin('https://prayer.earth', withOpaque)).toBe(true)
+  })
 })
 
 describe('isSameOrigin (default when ALLOWED_ORIGINS is unset)', () => {

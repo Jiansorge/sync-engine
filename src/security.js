@@ -12,14 +12,24 @@ export function allowOrigin(originHeader, allowedCsv) {
   if (list.length === 0) return true
   const given = (originHeader || '').trim()
   if (!given) return false
+  // Normalize to a comparable origin, but NEVER allow-list an opaque origin.
+  // Opaque origins (capacitor://, file://, sandboxed iframes, data:, about:)
+  // all serialize to the literal string "null" via `new URL(...).origin`, so
+  // without this guard a single opaque entry (e.g. capacitor://localhost)
+  // collapses to "null" and would match EVERY opaque origin — a cross-site
+  // WebSocket hijack. Native clients send no Origin at all and are admitted by
+  // the no-Origin path in shouldAllowUpgrade, so they never need an entry here.
   const norm = (u) => {
     try {
-      return new URL(u).origin
+      const p = new URL(u)
+      if (!p.protocol || p.origin === 'null') return null
+      return p.origin
     } catch {
-      return u.replace(/\/+$/, '')
+      return null
     }
   }
   const g = norm(given)
+  if (!g) return false
   return list.some((u) => norm(u) === g)
 }
 
