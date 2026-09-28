@@ -312,6 +312,11 @@ export class SyncRoom extends DurableObject {
     this._startsDirty = false
     this._loaded = false
     this._totals = null
+    // Totals counted while a durable load is still pending/failed. Folding these
+    // in after a successful load means a transient storage-read failure can
+    // never discard counted prayer starts (previously _countTotal wrote into a
+    // throwaway object the successful retry then replaced).
+    this._preLoadTotals = { prayers: {}, spirits: {} }
     this._totalSeconds = 0
     this._anonSeen = new Map() // anonId -> last active day (YYYY-MM-DD)
     this._recentStarts = new Map()
@@ -464,6 +469,14 @@ export class SyncRoom extends DurableObject {
   // count is never the thing that gets erased. Bounded AND self-healing.
   _countTotal(bucket, key) {
     if (!safeKey(key)) return
+    // Before the durable load completes, buffer into _preLoadTotals so a
+    // transient read failure can't discard the count when the retry replaces
+    // _totals. The buffer is folded in on a successful load.
+    if (!this._loaded) {
+      const m = this._preLoadTotals[bucket] || (this._preLoadTotals[bucket] = {})
+      m[key] = (m[key] || 0) + 1
+      return
+    }
     if (!this._totals || !this._totals[bucket]) return
     const map = this._totals[bucket]
     if (map[key] === undefined && Object.keys(map).length >= MAX_TOTALS_KEYS) {
@@ -780,7 +793,11 @@ export class SyncRoom extends DurableObject {
       const startsDirty = this._startsDirty
       if (totalsDirty) {
         this._totalsDirty = false
-        jobs.push(this.ctx.storage.put('totals', { ...this._totals }))
+        // structuredClone, not {...this._totals}: the shallow copy left
+        // prayers/spirit maps by reference, and _countTotal keeps mutating them
+        // while the put is in flight, so what actually landed was
+        // non-deterministic. Clone first so the write is an exact snapshot.
+        jobs.push(this.ctx.storage.put('totals', structuredClone(this._totals)))
       }
       if (secondsDirty) {
         this._secondsDirty = false
@@ -849,6 +866,19 @@ export class SyncRoom extends DurableObject {
         this._startsDirty = this._recentStarts.size !== recentStarts.length
         this._counts = { ...EMPTY_COUNTS(), ...(got.get('counts') || {}) }
         this._loaded = true
+        // Fold in any totals counted while the load was pending/failed so no
+        // counted start is lost to a transient storage-read error. (Set _loaded
+        // first so _countTotal applies to _totals instead of re-buffering.)
+        for (const bucket of ['prayers', 'spirits']) {
+          const pending = this._preLoadTotals[bucket] || {}
+          this._preLoadTotals[bucket] = {}
+          let folded = false
+          for (const [k] of Object.entries(pending)) {
+            this._countTotal(bucket, k)
+            folded = true
+          }
+          if (folded) this._totalsDirty = true
+        }
         if (this._startsDirty) this._schedulePersist()
       } catch {
         // Keep in-memory fallbacks so callers never crash, but leave _loaded

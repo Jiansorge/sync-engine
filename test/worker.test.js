@@ -97,6 +97,9 @@ describe('SyncRoom over the wire', () => {
     const stub = env.SYNC_ROOM.get(shardId(cell))
     const result = await runInDurableObject(stub, async (instance) => {
       instance._totals = instance._totals || { prayers: {}, spirits: {} }
+      // Mark loaded so _countTotal applies to _totals directly (in production
+      // the load always completes before presence counts a start).
+      instance._loaded = true
       // A real prayer with a healthy all-time count.
       for (let i = 0; i < 50; i++) instance._countTotal('prayers', 'mani')
       // Then flood with junk ids (each lands at 1).
@@ -107,6 +110,28 @@ describe('SyncRoom over the wire', () => {
     })
     expect(result.mani).toBe(50) // real high-count prayer survived the junk flood
     expect(result.keys).toBe(1000) // bucket stayed bounded
+  })
+
+  it('does not lose starts counted while a durable load is pending', async () => {
+    // F9: on a transient storage-read error _ensureLoaded leaves _loaded false
+    // with fallback state; _countTotal must BUFFER (not write into a throwaway
+    // the retry replaces), and the buffer must be folded in once loaded.
+    const cell = freshCell()
+    const stub = env.SYNC_ROOM.get(shardId(cell))
+    const result = await runInDurableObject(stub, async (instance) => {
+      instance._totals = { prayers: {}, spirits: {}, updatedAt: Date.now() }
+      instance._loaded = false // simulate a pending/failed load
+      instance._countTotal('prayers', 'mani') // counted before load completes
+      const buffered = (instance._preLoadTotals.prayers.mani || 0)
+      // Simulate a successful load finishing: fold the buffer into _totals.
+      instance._loaded = true
+      const pending = instance._preLoadTotals.prayers
+      instance._preLoadTotals.prayers = {}
+      for (const [k] of Object.entries(pending)) instance._countTotal('prayers', k)
+      return { buffered, after: instance._totals.prayers.mani || 0 }
+    })
+    expect(result.buffered).toBe(1) // went to the buffer, not the throwaway
+    expect(result.after).toBe(1) // folded into real totals after load
   })
 
   it('falls back to static assets for /audio/* when R2 is not bound', async () => {
