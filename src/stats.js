@@ -51,9 +51,10 @@ const cleanMap = (map) => {
   }
   return out
 }
+const DAY_MAP_LIMIT = 120 // must match prayer-earth's DAY_MAP_LIMIT (store.js)
 const cleanDayMap = (map) => {
   const out = {}
-  for (const d of Object.keys(map || {}).sort().slice(-62)) {
+  for (const d of Object.keys(map || {}).sort().slice(-DAY_MAP_LIMIT)) {
     if (DANGEROUS.has(d) || !validDay(d) || d > maxValidDay()) continue
     const cleaned = cleanMap(map[d])
     if (Object.keys(cleaned).length) out[d] = cleaned

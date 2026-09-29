@@ -75,6 +75,11 @@ export function mergeStats(base, incoming) {
     out.prayerCompletions[k] = pick(out.prayerCompletions[k], v)
   }
   out.prayerDayCompletions = mergeDay(base?.prayerDayCompletions, incoming.prayerDayCompletions)
+  // Reap any legacy prayerDayStats that an older record still carries: `out`
+  // starts as {...base}, so without this a pre-existing day-stats snapshot would
+  // live forever and be echoed back in every E_SYNC reply. The client keeps its
+  // own local copy.
+  delete out.prayerDayStats
   // prayerDayStats is not stored or synced server-side (unused functionally and
   // it dominated the frame size). The client keeps it locally.
   out.localPrayerSeconds = pick(base?.localPrayerSeconds, incoming.localPrayerSeconds)
