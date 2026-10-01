@@ -69,6 +69,23 @@ const JSON_HEADERS = {
 }
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: JSON_HEADERS })
 
+// Durable Object storage coerces a single-key ARRAY key to "people,<id>" when
+// writing, but reading with that same array form looks up a DIFFERENT key and
+// silently yields {} instead of the record. So every read, write and delete of
+// a person record must go through this one helper and use the string form. The
+// old inline ['people', id] meant every sync merged against an empty base (so a
+// second device with lower numbers silently overwrote a higher total) and
+// deletion deleted a key that was never there.
+const peopleKey = (id) => `people,${id}`
+
+// Hash a delete token for storage. The raw token is never written down, so a
+// dump of Durable Object storage cannot be replayed as a deletion capability.
+async function sha256Hex(text) {
+  const data = new TextEncoder().encode(text)
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 // The app shell (/) is served here in the Worker (run_worker_first), so the
 // `_headers` static-assets rules don't reach it — attach the security headers
 // directly. Hashed /assets/*, /audio/* and icons are served by the assets
@@ -200,6 +217,76 @@ export default {
         return env.COORDINATOR.get(id).fetch(request)
       }
       return servePage(request, env)
+    }
+
+    // Self-service data deletion.
+    //
+    // Joining Palms has no accounts, so the anonymous ID is the only way to name
+    // a record. Deleting on the ID alone would mean anyone who ever saw a
+    // recovery code (people email them to us, or to each other) could destroy
+    // that person's history. So deletion requires a SECOND secret that never
+    // travels in the sync payload's identity: a high-entropy deleteToken,
+    // generated on the device, stored only as a hash here, and compared in
+    // constant time.
+    //
+    // The token rides the existing TLS connection, so the raw value is never
+    // stored server-side and never leaves the encrypted channel.
+    if (url.pathname === '/delete' && request.method === 'POST') {
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown'
+      // Tighter than the read path: this is destructive and irreversible, so it
+      // gets its own small budget to blunt both guessing and abuse.
+      if (httpRateLimited(ip + ':del', envNum(env, 'DELETE_RATE_MAX', 5), envNum(env, 'DELETE_RATE_WINDOW_MS', 60000))) {
+        return json({ ok: false, error: 'rate_limited' }, 429)
+      }
+      const origin = request.headers.get('Origin')
+      if (origin && !shouldAllowUpgrade(origin, env.ALLOWED_ORIGINS, request.url)) {
+        return json({ ok: false, error: 'forbidden' }, 403)
+      }
+      let body
+      try {
+        body = await request.json()
+      } catch {
+        return json({ ok: false, error: 'bad_request' }, 400)
+      }
+      const anonId = typeof body?.anonId === 'string' ? body.anonId.slice(0, 64) : ''
+      const token = typeof body?.token === 'string' ? body.token.slice(0, 128) : ''
+      if (!anonId || !token) return json({ ok: false, error: 'bad_request' }, 400)
+
+      // Records are sharded by the user's location cell, but a delete request
+      // only knows the anonId - there is no cell in it, and an anonId is not
+      // derivable to a shard. So the record could be in ANY shard, and this
+      // route has to actually look. Each shard is asked to compare the token
+      // itself and delete only if the hash matches, so the comparison always
+      // happens where the data lives and two shards can never both claim it.
+      // v1 runs a single shard, so this is exactly one round-trip in production.
+      const n = shardCount(env)
+      const payload = JSON.stringify({ anonId, token })
+      const results = await Promise.all(
+        allShardNames(n).map((name) =>
+          env.SYNC_ROOM
+            .get(env.SYNC_ROOM.idFromName(name))
+            .fetch(
+              new Request('https://internal/delete', { method: 'POST', body: payload })
+            )
+            .then((res) => res.json().catch(() => ({ ok: false, error: 'bad_gateway' })))
+            .catch((err) => {
+              console.error(`sync-engine: delete fan-out to ${name} failed`, err && err.message)
+              return { ok: false, error: 'shard_unavailable' }
+            })
+        )
+      )
+      // A shard that matched wins. Otherwise report the most informative failure
+      // so the client can tell "nothing deleted" from "could not reach it" -
+      // the client must never wipe local data unless it sees ok:true.
+      if (results.some((r) => r && r.ok)) return json({ ok: true, deleted: true })
+      // Do not paper over a real fault as "not found": that would tell a user
+      // their data is gone when it is still on the server.
+      const fault = results.find((r) => r && r.error && r.error !== 'not_found')
+      if (fault) {
+        const status = fault.error === 'bad_request' ? 400 : fault.error === 'rate_limited' ? 429 : 503
+        return json({ ok: false, error: fault.error }, status)
+      }
+      return json({ ok: false, error: 'not_found' }, 404)
     }
 
     return new Response('Not found', { status: 404 })
@@ -383,6 +470,44 @@ export class SyncRoom extends DurableObject {
         counts: this._counts,
         updatedAt: this._totals.updatedAt
       })
+    }
+    // Self-service deletion, forwarded here from the edge. The raw token is
+    // hashed and never stored; the stored hash is compared in constant time so
+    // neither a wrong token nor a timing signal can walk toward a valid one.
+    if (url.pathname === '/delete' && request.method === 'POST') {
+      let body
+      try {
+        body = await request.json()
+      } catch {
+        return json({ ok: false, error: 'bad_request' }, 400)
+      }
+      const anonId = typeof body?.anonId === 'string' ? body.anonId.slice(0, 64) : ''
+      const token = typeof body?.token === 'string' ? body.token.slice(0, 128) : ''
+      if (!anonId || !token) return json({ ok: false, error: 'bad_request' }, 400)
+
+      await this._ensureLoaded()
+      const rec = (await this.ctx.storage.get(peopleKey(anonId))) || {}
+      const storedHash = rec.tokenHash
+      const givenHash = await sha256Hex(token)
+      // No record, or no token was ever registered, or it does not match: all
+      // the same answer, so this endpoint cannot be used to probe which
+      // anonymous IDs exist.
+      if (!storedHash || !safeEqual(storedHash, givenHash)) {
+        return json({ ok: false, error: 'not_found' }, 404)
+      }
+
+      // Erase the record. The lifetime counters for this identity are gone, and
+      // its rate-limit entry with it. The worldwide aggregate is deliberately
+      // NOT adjusted: subtracting one person's prayers would lower the total for
+      // everyone, and the aggregate is not attributable to anyone.
+      await this.ctx.storage.delete(peopleKey(anonId))
+      this._anonSeen.delete(anonId)
+      // The anonSeen entry is a durable record that this anonId was ever seen.
+      // Leaving it behind would mean a "deleted" identity is still written on
+      // disk, so it has to be marked dirty and flushed before we answer.
+      this._seenDirty = true
+      await this._flushStorage()
+      return json({ ok: true, deleted: true })
     }
     return json({ type: 'sync-engine', protocol: PROTOCOL_VERSION, ok: true })
   }
@@ -593,10 +718,22 @@ export class SyncRoom extends DurableObject {
     if (now - lastSync < envNum(this.env, 'SYNC_MIN_INTERVAL_MS', DEFAULTS.syncMinIntervalMs)) return
     this._syncAt.set(ws, now)
 
-    const key = ['people', id]
+    const key = peopleKey(id)
+    // Must be a real read: with the old array key this always came back empty,
+    // so every sync merged against zero and a second device with lower numbers
+    // silently overwrote a higher lifetime total.
     const prev = (await this.ctx.storage.get(key)) || {}
     // Shared max-merge (protocol.js) — idempotent, so replayed syncs are safe.
     const merged = mergeStats(prev, incoming)
+
+    // Register (or refresh) the delete-token hash on first sync, so the account
+    // can later self-serve deletion. Only ever SET, never merged: a record keeps
+    // the token it was created with, so a stolen replayed sync cannot silently
+    // swap in an attacker's token and take over the ability to delete.
+    if (typeof msg.token === 'string' && msg.token && msg.token.length <= 128 && !merged.tokenHash) {
+      merged.tokenHash = await sha256Hex(msg.token)
+    }
+
     await this.ctx.storage.put(key, merged)
     await this._bump('sync')
 

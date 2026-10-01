@@ -31,6 +31,8 @@ function cellOnShard(shard) {
   throw new Error(`no cell found for shard ${shard}`)
 }
 
+const peopleKeyFor = (id) => `people,${id}`
+
 let nextShard = 0
 function freshCell() {
   return cellOnShard(nextShard++)
@@ -561,5 +563,198 @@ describe('SyncRoom over the wire', () => {
     expect(v.spirits).toEqual({ buddhism: 7 })
     expect(v.seconds).toBe(42)
     expect(typeof v.at).toBe('number')
+  })
+
+  // ---- durable merge across devices ----------------------------------------
+  // Regression: the person record was read with a Durable Object array key,
+  // which never matches what was written, so `prev` was always empty. Every
+  // sync therefore merged against zero and REPLACED the stored totals instead of
+  // max-merging them - so a second device with fewer prayers silently lowered
+  // the record. This is the whole no-data-loss promise, so it gets a test.
+  describe('lifetime stats survive a second device', () => {
+    async function syncAnon(anonId, stats, cell) {
+      const ws = await openWs(cell)
+      const seen = watch(ws)
+      ws.send(JSON.stringify({ type: C_SYNC, anonId, stats }))
+      await waitFor(seen, (m) => m.type === E_SYNC)
+      ws.close()
+      await sleep(60) // clear the per-socket sync interval
+    }
+
+    it('does not let a lower total from another device overwrite a higher one', async () => {
+      const cell = freshCell()
+      const stub = env.SYNC_ROOM.get(shardId(cell))
+      await syncAnon('merge-1', { localPrayerSeconds: 100, prayerCompletions: { mani: 9 } }, cell)
+      await syncAnon('merge-1', { localPrayerSeconds: 5, prayerCompletions: { mani: 1 } }, cell)
+      const rec = await runInDurableObject(stub, async (i) =>
+        i.ctx.storage.get(peopleKeyFor('merge-1'))
+      )
+      expect(rec.localPrayerSeconds).toBe(100)
+      expect(rec.prayerCompletions.mani).toBe(9)
+    })
+
+    it('keeps the higher value of each field independently', async () => {
+      const cell = freshCell()
+      const stub = env.SYNC_ROOM.get(shardId(cell))
+      await syncAnon('merge-2', { localPrayerSeconds: 10, prayerCompletions: { mani: 2 } }, cell)
+      await syncAnon('merge-2', { localPrayerSeconds: 4, prayerCompletions: { mani: 7 } }, cell)
+      const rec = await runInDurableObject(stub, async (i) =>
+        i.ctx.storage.get(peopleKeyFor('merge-2'))
+      )
+      expect(rec.localPrayerSeconds).toBe(10)
+      expect(rec.prayerCompletions.mani).toBe(7)
+    })
+
+    it('is idempotent when the same device syncs repeatedly', async () => {
+      const cell = freshCell()
+      const stub = env.SYNC_ROOM.get(shardId(cell))
+      const stats = { localPrayerSeconds: 42, prayerCompletions: { mani: 3 } }
+      await syncAnon('merge-3', stats, cell)
+      await syncAnon('merge-3', stats, cell)
+      await syncAnon('merge-3', stats, cell)
+      const rec = await runInDurableObject(stub, async (i) =>
+        i.ctx.storage.get(peopleKeyFor('merge-3'))
+      )
+      expect(rec.localPrayerSeconds).toBe(42)
+      expect(rec.prayerCompletions.mani).toBe(3)
+    })
+  })
+
+  // ---- self-service deletion ------------------------------------------------
+  // The deployed Worker is the only place a record can actually be erased, so
+  // the contract has to be tested here. The dev server in prayer-earth proves
+  // the same contract, but it is different code - these tests are what would
+  // have caught an erased identity being written back to disk.
+  describe('self-service deletion', () => {
+    // The delete path has its own tight rate budget, keyed by IP. Every test
+    // gets a distinct IP so one test cannot exhaust another's budget, which is
+    // what made these flaky when they all shared an address.
+    let ipCounter = 0
+    const nextIp = () => `10.0.${Math.floor(ipCounter / 250)}.${(ipCounter++ % 250) + 1}`
+
+    const activeStats = () => ({
+      localPrayerSeconds: 7,
+      prayerCompletions: { mani: 1 },
+      lastPrayedDay: dayKey()
+    })
+
+    async function register(anonId, token, cell, stats = activeStats()) {
+      const ws = await openWs(cell)
+      const seen = watch(ws)
+      ws.send(JSON.stringify({ type: C_SYNC, anonId, token, stats }))
+      await waitFor(seen, (m) => m.type === E_SYNC)
+      ws.close()
+    }
+
+    const post = (body, ip = nextIp()) =>
+      exports.default.fetch('http://sync-engine.local/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'CF-Connecting-IP': ip },
+        body: JSON.stringify(body)
+      })
+
+    it('erases the record AND the anonSeen entry from storage', async () => {
+      const cell = freshCell()
+      await register('del-erase', 'token-erase', cell)
+      const stub = env.SYNC_ROOM.get(shardId(cell))
+      await runInDurableObject(stub, async (instance) => {
+        await instance._flushStorage() // the anonSeen write is debounced
+        expect(await instance.ctx.storage.get(peopleKeyFor('del-erase'))).toBeTruthy()
+        expect(instance._anonSeen.has('del-erase')).toBe(true)
+      })
+
+      const res = await post({ anonId: 'del-erase', token: 'token-erase' })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ ok: true, deleted: true })
+
+      // The part that actually matters. Checking the live Map is not enough -
+      // the object could hold the erased identity in memory and write it back.
+      await runInDurableObject(stub, async (instance) => {
+        expect(await instance.ctx.storage.get(peopleKeyFor('del-erase'))).toBeUndefined()
+        const persisted = await instance.ctx.storage.get('anonSeen')
+        expect(JSON.stringify(persisted || [])).not.toContain('del-erase')
+      })
+    })
+
+    it('refuses a wrong token and leaves the record untouched', async () => {
+      const cell = freshCell()
+      await register('del-wrong', 'right-token', cell)
+      const res = await post({ anonId: 'del-wrong', token: 'wrong-token' })
+      expect(res.status).toBe(404)
+      expect(await res.json()).toEqual({ ok: false, error: 'not_found' })
+      await runInDurableObject(env.SYNC_ROOM.get(shardId(cell)), async (instance) => {
+        expect(await instance.ctx.storage.get(peopleKeyFor('del-wrong'))).toBeTruthy()
+      })
+    })
+
+    it('gives the same answer for an unknown id, so ids cannot be probed', async () => {
+      const res = await post({ anonId: 'never-existed', token: 'whatever' })
+      expect(res.status).toBe(404)
+      expect(await res.json()).toEqual({ ok: false, error: 'not_found' })
+    })
+
+    it('refuses an id that synced before tokens existed', async () => {
+      // No tokenHash means undeletable by design: otherwise anyone holding only
+      // an old recovery code could erase that person.
+      const cell = freshCell()
+      await register('del-legacy', undefined, cell, {
+        localPrayerSeconds: 3,
+        prayerCompletions: {},
+        lastPrayedDay: dayKey()
+      })
+      const res = await post({ anonId: 'del-legacy', token: 'anything' })
+      expect(res.status).toBe(404)
+    })
+
+    it('keeps the first token across later syncs (no takeover by replay)', async () => {
+      const cell = freshCell()
+      await register('del-persist', 'tok-first', cell)
+      // A replayed sync offering a different token must not take over deletion.
+      await register('del-persist', 'tok-attacker', cell)
+      const old = await post({ anonId: 'del-persist', token: 'tok-first' })
+      expect(old.status).toBe(200)
+    })
+
+    it('rejects malformed bodies without touching anything', async () => {
+      for (const body of [{}, { anonId: 'x' }, { token: 'x' }, { anonId: 1, token: 2 }]) {
+        const res = await post(body)
+        expect(res.status).toBe(400)
+      }
+      const res = await exports.default.fetch('http://sync-engine.local/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'CF-Connecting-IP': nextIp() },
+        body: 'not json'
+      })
+      expect(res.status).toBe(400)
+    })
+
+    it('does not lower the worldwide total when one person is deleted', async () => {
+      const cell = freshCell()
+      await register('del-total', 'tok-total', cell)
+      const stub = env.SYNC_ROOM.get(shardId(cell))
+      const before = await runInDurableObject(stub, async (i) => ({ ...i._totals }))
+      await post({ anonId: 'del-total', token: 'tok-total' })
+      const after = await runInDurableObject(stub, async (i) => ({ ...i._totals }))
+      expect(after.prayers).toBe(before.prayers)
+    })
+
+    it('is a clean no-op when repeated', async () => {
+      const cell = freshCell()
+      await register('del-twice', 'tok-twice', cell)
+      const ip = nextIp()
+      expect((await post({ anonId: 'del-twice', token: 'tok-twice' }, ip)).status).toBe(200)
+      const second = await post({ anonId: 'del-twice', token: 'tok-twice' }, ip)
+      expect(second.status).toBe(404)
+    })
+
+    it('rate-limits a flood of delete attempts from one address', async () => {
+      const ip = nextIp()
+      const codes = []
+      for (let i = 0; i < 9; i++) {
+        codes.push((await post({ anonId: 'flood-' + i, token: 'x' }, ip)).status)
+      }
+      expect(codes).toContain(429)
+      expect(codes[0]).not.toBe(429)
+    })
   })
 })
