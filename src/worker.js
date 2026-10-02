@@ -77,6 +77,9 @@ const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, 
 // second device with lower numbers silently overwrote a higher total) and
 // deletion deleted a key that was never there.
 const peopleKey = (id) => `people,${id}`
+// Tombstone for an identity that asked to be erased. Holds only a hash of the
+// token that authorised the delete, so it can never authorise one itself.
+const deletedKey = (id) => `deleted,${id}`
 
 // Hash a delete token for storage. The raw token is never written down, so a
 // dump of Durable Object storage cannot be replayed as a deletion capability.
@@ -510,6 +513,9 @@ export class SyncRoom extends DurableObject {
       // NOT adjusted: subtracting one person's prayers would lower the total for
       // everyone, and the aggregate is not attributable to anyone.
       await this.ctx.storage.delete(peopleKey(anonId))
+      // Tombstone, so a second device holding the same identity cannot rebuild
+      // the record we just erased.
+      await this.ctx.storage.put(deletedKey(anonId), { tokenHash: rec.tokenHash || null, at: Date.now() })
       this._anonSeen.delete(anonId)
       // The anonSeen entry is a durable record that this anonId was ever seen.
       // Leaving it behind would mean a "deleted" identity is still written on
@@ -788,6 +794,52 @@ export class SyncRoom extends DurableObject {
     }
 
     const key = peopleKey(id)
+    // A tombstone: this identity asked to be erased, so refuse to recreate it.
+    //
+    // Deletion closes the requesting device's socket, which stops THAT device
+    // from resurrecting the record - but the whole point of a recovery code is
+    // that several devices hold one identity, and every other device is still
+    // connected and still syncing. Without this, the first one to sync after the
+    // delete silently rebuilds everything the user just erased, while we have
+    // already told them it was gone.
+    //
+    // The tombstone stores only a hash of the token that authorised the delete,
+    // so it can never be used to authorise a deletion itself.
+    const tomb = await this.ctx.storage.get(deletedKey(id))
+    if (tomb) {
+      // The holder of the deleting token is the same person, on another device:
+      // honour the delete by minting them a fresh identity rather than
+      // silently dropping their writes.
+      if (
+        typeof msg.token === 'string' &&
+        msg.token &&
+        msg.token.length <= 128 &&
+        tomb.tokenHash &&
+        safeEqual(await sha256Hex(msg.token), tomb.tokenHash)
+      ) {
+        const fresh = 'anon-' + crypto.randomUUID()
+        const freshSess = this.sessions.get(ws)
+        if (freshSess) freshSess.anonId = fresh
+        this._syncAt.set(ws, now)
+        await this._writeRecord(peopleKey(fresh), {
+          ...incoming,
+          tokenHash: typeof msg.token === 'string' && msg.token ? await sha256Hex(msg.token) : undefined
+        })
+        return this._send(
+          ws,
+          JSON.stringify({ type: E_SYNC, anonId: fresh, stats: incoming, reissued: true })
+        )
+      }
+      // Someone without the deleting token: refuse, and say why. Silent
+      // success here would let them believe their prayer history is safe when
+      // nothing is being stored.
+      this._bump('rejected').catch(() => {})
+      return this._send(
+        ws,
+        JSON.stringify({ type: E_SYNC, error: 'deleted', anonId: id })
+      )
+    }
+
     // Must be a real read: with the old array key this always came back empty,
     // so every sync merged against zero and a second device with lower numbers
     // silently overwrote a higher lifetime total.
@@ -803,20 +855,29 @@ export class SyncRoom extends DurableObject {
       merged.tokenHash = await sha256Hex(msg.token)
     }
 
+    // One write, and only after the token hash is attached: writing first would
+    // persist a record with no hash, which a delete then refuses as not_found.
+    await this._writeRecord(key, merged)
+    this._send(ws, JSON.stringify({ type: E_SYNC, stats: merged }))
+  }
+
+  // Write one sync payload, and track the day for the usage counters.
+  //
+  // Extracted because a reissued identity has to go through exactly the same
+  // path as a first-time sync. Sharing it is the point: a copy of the write
+  // logic is a copy that can drift.
+  async _writeRecord(key, merged) {
     await this.ctx.storage.put(key, merged)
     await this._bump('sync')
-
-    // Track active users from the synced lifetime stats (durable, debounced).
     await this._ensureLoaded()
     const day = activeDayFromStats(merged)
     if (day) {
-      this._anonSeen.set(id, day)
+      this._anonSeen.set(key.slice('people,'.length), day)
       this._pruneSeen(false)
       this._seenDirty = true
       this._schedulePersist()
     }
-
-    this._send(ws, JSON.stringify({ type: E_SYNC, stats: merged }))
+    return merged
   }
 
   // ---- feed (coalesced) ----
