@@ -33,9 +33,13 @@ function cellOnShard(shard) {
 
 const peopleKeyFor = (id) => `people,${id}`
 
+// Shards are assigned round-robin rather than handed out in sequence: a fixed
+// sequence runs off the end of the shard space as soon as the suite grows past
+// NUM_SHARDS tests, and the failure ("no cell found for shard 32") looks like a
+// product bug instead of an exhausted counter.
 let nextShard = 0
 function freshCell() {
-  return cellOnShard(nextShard++)
+  return cellOnShard(nextShard++ % NUM_SHARDS)
 }
 
 function shardId(cell) {
@@ -173,6 +177,65 @@ describe('SyncRoom over the wire', () => {
     expect(feed.feed.some((f) => f.prayerId === 'lords-prayer')).toBe(true)
 
     sender.close()
+    observer.close()
+  })
+
+  it('retracts a withdrawn name from the feed instead of leaving it to age out', async () => {
+    const cell = freshCell()
+    const observer = await openWs(cell)
+    const seen = watch(observer)
+    const sender = await openWs(cell)
+    watch(sender)
+
+    sender.send(
+      JSON.stringify({
+        type: C_PRESENCE,
+        praying: true,
+        prayerId: 'mani',
+        spiritId: 'hinduism',
+        name: 'Regrettable Name',
+        cell: '10,20'
+      })
+    )
+    const before = await waitFor(seen, (m) => m.type === E_FEED)
+    expect(before.feed.some((f) => f.name === 'Regrettable Name')).toBe(true)
+
+    // Withdrawing consent is a frame with no name and no cell.
+    sender.send(JSON.stringify({ type: C_PRESENCE, praying: false }))
+
+    // The retraction has to reach a client that was already connected, so poll
+    // the broadcasts rather than only inspecting server state.
+    // Read the server's own view: the purge must be in effect for every client,
+    // which is exactly why a feed left to age out is not equivalent.
+    const stub = env.SYNC_ROOM.get(shardId(cell))
+    const remaining = await runInDurableObject(stub, async (instance) =>
+      instance.feed.map((f) => f.name)
+    )
+    expect(remaining).not.toContain('Regrettable Name')
+
+    // Someone else's entry survives: the purge is per-session, not global.
+    const other = await openWs(cell)
+    watch(other)
+    other.send(
+      JSON.stringify({
+        type: C_PRESENCE,
+        praying: true,
+        prayerId: 'ave-maria',
+        spiritId: 'catholicism',
+        name: 'Someone Else',
+        cell: '11,21'
+      })
+    )
+    // Wait for the frame that actually contains the new entry: earlier broadcasts
+    // are still queued, and taking the first would read the retract frame.
+    const afterOther = await waitFor(
+      seen,
+      (m) => m.type === E_FEED && m.feed.some((f) => f.name === 'Someone Else')
+    )
+    expect(afterOther.feed.some((f) => f.name === 'Regrettable Name')).toBe(false)
+
+    sender.close()
+    other.close()
     observer.close()
   })
 
@@ -665,7 +728,13 @@ describe('SyncRoom over the wire', () => {
 
       const res = await post({ anonId: 'del-erase', token: 'token-erase' })
       expect(res.status).toBe(200)
-      expect(await res.json()).toEqual({ ok: true, deleted: true })
+      expect(await res.json()).toMatchObject({
+        ok: true,
+        deleted: true,
+        // Nobody was connected, so there was no live presence to withdraw. A
+        // record with no session is still a complete deletion.
+        withdrawn: false
+      })
 
       // The part that actually matters. Checking the live Map is not enough -
       // the object could hold the erased identity in memory and write it back.
@@ -745,6 +814,164 @@ describe('SyncRoom over the wire', () => {
       expect((await post({ anonId: 'del-twice', token: 'tok-twice' }, ip)).status).toBe(200)
       const second = await post({ anonId: 'del-twice', token: 'tok-twice' }, ip)
       expect(second.status).toBe(404)
+    })
+
+    it('withdraws a deleted person from the live world immediately', async () => {
+      const cell = freshCell()
+      const stub = env.SYNC_ROOM.get(shardId(cell))
+
+      // A live socket that has published a name and is still connected.
+      const live = await openWs(cell)
+      const liveSeen = watch(live)
+      live.send(
+        JSON.stringify({
+          type: C_PRESENCE,
+          praying: true,
+          prayerId: 'mani',
+          spiritId: 'hinduism',
+          name: 'Soon Deleted',
+          cell: '12,22'
+        })
+      )
+      // The socket is tied to its identity by the sync frame, which is the only
+      // link between a presence session and a stored record.
+      live.send(
+        JSON.stringify({
+          type: C_SYNC,
+          anonId: 'del-live',
+          token: 'tok-live',
+          stats: { localPrayerSeconds: 1 }
+        })
+      )
+      await waitFor(liveSeen, (m) => m.type === E_SYNC && m.stats)
+      await waitFor(liveSeen, (m) => m.type === E_FEED && m.feed.some((f) => f.name === 'Soon Deleted'))
+
+      const res = await post({ anonId: 'del-live', token: 'tok-live' })
+      expect(res.status).toBe(200)
+      expect((await res.json()).withdrawn).toBe(true)
+
+      // Visible immediately: gone from the feed, and told to stop publishing.
+      const names = await runInDurableObject(stub, async (instance) =>
+        instance.feed.map((f) => f.name)
+      )
+      expect(names).not.toContain('Soon Deleted')
+      const told = await waitFor(liveSeen, (m) => m.type === E_SYNC && m.withdrawn)
+      expect(told.withdrawn).toBe(true)
+      expect(told.reason).toBe('deleted')
+
+      // The session itself is dropped, not merely hidden. Scoped to the deleted
+      // identity rather than to a total, because a shard can be reused by other
+      // tests in this suite and their sockets are not ours to count.
+      const stillPresent = await runInDurableObject(stub, async (instance) =>
+        [...instance.sessions.values()].some((s) => s && s.anonId === 'del-live')
+      )
+      expect(stillPresent).toBe(false)
+
+      live.close()
+    })
+
+    it('leaves other people in the world alone when one is deleted', async () => {
+      const cell = freshCell()
+      const stub = env.SYNC_ROOM.get(shardId(cell))
+
+      const keep = await openWs(cell)
+      const keepSeen = watch(keep)
+      keep.send(
+        JSON.stringify({
+          type: C_PRESENCE,
+          praying: true,
+          prayerId: 'ave-maria',
+          spiritId: 'catholicism',
+          name: 'Still Here',
+          cell: '13,23'
+        })
+      )
+      keep.send(JSON.stringify({ type: C_SYNC, anonId: 'keep-me', stats: { localPrayerSeconds: 1 } }))
+      await waitFor(keepSeen, (m) => m.type === E_SYNC && m.stats)
+
+      const gone = await openWs(cell)
+      const goneSeen = watch(gone)
+      gone.send(
+        JSON.stringify({
+          type: C_PRESENCE,
+          praying: true,
+          prayerId: 'mani',
+          spiritId: 'hinduism',
+          name: 'Going Away',
+          cell: '14,24'
+        })
+      )
+      gone.send(JSON.stringify({ type: C_SYNC, anonId: 'remove-me', token: 'tok-remove', stats: { localPrayerSeconds: 1 } }))
+      await waitFor(goneSeen, (m) => m.type === E_SYNC && m.stats)
+
+      expect((await post({ anonId: 'remove-me', token: 'tok-remove' })).status).toBe(200)
+
+      const state = await runInDurableObject(stub, async (instance) => ({
+        names: instance.feed.map((f) => f.name),
+        ids: [...instance.sessions.values()].map((s) => s && s.anonId).filter(Boolean)
+      }))
+      expect(state.names).toContain('Still Here')
+      expect(state.names).not.toContain('Going Away')
+      // The innocent bystander is still connected, and the deleted one is not.
+      expect(state.ids).toContain('keep-me')
+      expect(state.ids).not.toContain('remove-me')
+
+      keep.close()
+      gone.close()
+    })
+
+    it('keeps a deleted person out of the state broadcast', async () => {
+      const cell = freshCell()
+      const stub = env.SYNC_ROOM.get(shardId(cell))
+      const observer = await openWs(cell)
+      const seen = watch(observer)
+
+      const gone = await openWs(cell)
+      watch(gone)
+      gone.send(
+        JSON.stringify({
+          type: C_PRESENCE,
+          praying: true,
+          prayerId: 'mani',
+          spiritId: 'hinduism',
+          name: 'State Visible',
+          cell: '15,25'
+        })
+      )
+      gone.send(
+        JSON.stringify({
+          type: C_SYNC,
+          anonId: 'state-gone',
+          token: 'tok-state-gone',
+          stats: { localPrayerSeconds: 1 }
+        })
+      )
+      // The live state carries counts and lights, never names, so assert on the
+      // light this person lit rather than on a name that is not sent.
+      await waitFor(seen, (m) => m.type === E_STATE && (m.lights || {})['15,25'] >= 1)
+
+      expect((await post({ anonId: 'state-gone', token: 'tok-state-gone' })).status).toBe(200)
+
+      // Their light and their place in the world's headcount must go with them, or
+      // the globe keeps showing a stranger's prayer for the next 60s sweep.
+      const withdrawn = await runInDurableObject(stub, async (instance) => {
+        await instance._flushState()
+        return instance._computeState()
+      })
+      expect(withdrawn.lights['15,25']).toBeUndefined()
+      expect(withdrawn.people).toBe(0)
+
+      gone.close()
+      observer.close()
+    })
+
+    it('still deletes when the requester has no live session', async () => {
+      const cell = freshCell()
+      await register('del-offline-user', 'tok-offline-user', cell)
+      const res = await post({ anonId: 'del-offline-user', token: 'tok-offline-user' })
+      expect(res.status).toBe(200)
+      // No socket to withdraw, and that must not be an error.
+      expect((await res.json()).withdrawn).toBe(false)
     })
 
     it('rate-limits a flood of delete attempts from one address', async () => {

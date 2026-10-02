@@ -278,7 +278,16 @@ export default {
       // A shard that matched wins. Otherwise report the most informative failure
       // so the client can tell "nothing deleted" from "could not reach it" -
       // the client must never wipe local data unless it sees ok:true.
-      if (results.some((r) => r && r.ok)) return json({ ok: true, deleted: true })
+      if (results.some((r) => r && r.ok)) {
+        // Report whether the person's live presence was withdrawn too. The
+        // client uses this to confirm the withdrawal landed rather than
+        // assuming it did.
+        return json({
+          ok: true,
+          deleted: true,
+          withdrawn: results.some((r) => r && r.ok && r.withdrawn)
+        })
+      }
       // Do not paper over a real fault as "not found": that would tell a user
       // their data is gone when it is still on the server.
       const fault = results.find((r) => r && r.error && r.error !== 'not_found')
@@ -507,7 +516,39 @@ export class SyncRoom extends DurableObject {
       // disk, so it has to be marked dirty and flushed before we answer.
       this._seenDirty = true
       await this._flushStorage()
-      return json({ ok: true, deleted: true })
+
+// A deleted person must stop being visible immediately, not whenever the
+  // 60s presence TTL happens to sweep them. Their socket may still be open -
+  // the app clears local data but does not close the connection - so withdraw
+  // every session that belongs to this identity and retract their feed
+  // entries now, then tell them so their client stops publishing.
+  //
+  // This runs after the record is gone on purpose: a deletion must still
+  // complete even if a socket dies mid-loop, and matching on the now-deleted
+  // anonId cannot be spoofed by another identity claiming it.
+  const doomed = []
+      for (const [ws, sess] of this.sessions) {
+        if (!sess || sess.anonId !== anonId) continue
+        doomed.push({ ws, sid: sess.sessionId || '' })
+      }
+      for (const { ws, sid } of doomed) {
+        this.sessions.delete(ws)
+        try {
+          this._send(ws, JSON.stringify({ type: E_SYNC, withdrawn: true, reason: 'deleted' }))
+        } catch {}
+        try {
+          ws.close(1012, 'identity deleted')
+        } catch {}
+      }
+      if (doomed.length) {
+        // Retract only THIS person's entries - sids are per-session, so anyone
+        // else's feed survives.
+        const mine = new Set(doomed.map((d) => d.sid).filter(Boolean))
+        this._retractFeed((e) => mine.has(e && e.sid))
+        this._markStateDirty()
+        this._flushState().catch(() => {})
+      }
+      return json({ ok: true, deleted: true, withdrawn: doomed.length > 0 })
     }
     return json({ type: 'sync-engine', protocol: PROTOCOL_VERSION, ok: true })
   }
@@ -635,16 +676,24 @@ export class SyncRoom extends DurableObject {
         cell = gridKey(la, loN)
       }
     }
+    // The server owns the session id. Trusting a client-supplied one would mean a
+    // client that omits it (or restarts without persisting it) can never have
+    // its own feed entries retracted, which is precisely the case where
+    // retraction matters. A client-supplied value is still accepted, because it
+    // lets a reconnect be recognised as the same person.
     const sessionId =
-      typeof msg.sessionId === 'string' && msg.sessionId.length <= 80 && safeKey(msg.sessionId)
+      (typeof msg.sessionId === 'string' && msg.sessionId.length <= 80 && safeKey(msg.sessionId)
         ? msg.sessionId
+        : '') || (prev && prev.sessionId) || this._newSessionId()
+    // A frame with no usable name is a WITHDRAWAL, not an anonymous entry, so
+    // the empty name has to survive as '' rather than being replaced with
+    // 'Someone'. The placeholder is applied only where a name is actually shown.
+    const rawName =
+      typeof msg.name === 'string' && msg.name.trim()
+        ? msg.name.replace(/[\u0000-\u001f\u007f]/g, '').trim()
         : ''
     const session = {
-      name: (
-        typeof msg.name === 'string' && msg.name.trim()
-          ? msg.name.replace(/[\u0000-\u001f\u007f]/g, '').trim()
-          : 'Someone'
-      ).slice(0, 24),
+      name: rawName.slice(0, 24),
       prayerId: msg.praying ? String(msg.prayerId || '').slice(0, 60) : null,
       spiritId: msg.praying ? String(msg.spiritId || '').slice(0, 60) : null,
       cell,
@@ -655,6 +704,15 @@ export class SyncRoom extends DurableObject {
     }
     this.sessions.set(ws, session)
     await this._bump('presence')
+
+    // Withdrawal: the client just sent a frame with no name and no cell, which
+    // is how it revokes consent. Entries already pushed to the feed have
+    // reached every connected client, so they are retracted here rather than
+    // left to age out of the bounded window - otherwise "turn it off" would
+    // still leave the name on screen for minutes.
+    if (prev && prev.sessionId && (!session.name || !session.cell)) {
+      this._retractFeed((e) => e && e.sid === prev.sessionId)
+    }
     // Persist the session on the socket so presence survives DO hibernation
     // (the in-memory `sessions` map is lost on eviction; the attachment rides
     // the socket and is restored on the next message).
@@ -718,6 +776,17 @@ export class SyncRoom extends DurableObject {
     if (now - lastSync < envNum(this.env, 'SYNC_MIN_INTERVAL_MS', DEFAULTS.syncMinIntervalMs)) return
     this._syncAt.set(ws, now)
 
+    // Tie the socket to its identity, so a deletion can find and withdraw the
+    // live session of the person who asked to be removed. Presence alone carries
+    // no identity, so this is the only link between the two.
+    const sess = this.sessions.get(ws)
+    if (sess) {
+      sess.anonId = id
+      try {
+        ws.serializeAttachment(sess)
+      } catch {}
+    }
+
     const key = peopleKey(id)
     // Must be a real read: with the old array key this always came back empty,
     // so every sync merged against zero and a second device with lower numbers
@@ -751,11 +820,23 @@ export class SyncRoom extends DurableObject {
   }
 
   // ---- feed (coalesced) ----
+  _newSessionId() {
+    this._sessionSeq = (this._sessionSeq || 0) + 1
+    return 's' + this._sessionSeq.toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+  }
+
   pushFeed(session) {
+    // The session id is carried so a later withdrawal can retract this entry.
+    // Without it a name already published to every connected client would
+    // survive until the bounded window rolled over, which is not the same thing
+    // as withdrawing consent.
     this.feed.push({
       id: ++this.feedSeq,
       t: Date.now(),
-      name: session.name,
+      sid: session.sessionId || '',
+      // A withdrawn session keeps an empty name; show the anonymous placeholder
+    // only at display time so consent state is never conflated with anonymity.
+    name: session.name || 'Someone',
       spiritId: session.spiritId,
       prayerId: session.prayerId,
       cell: session.cell
@@ -832,6 +913,25 @@ export class SyncRoom extends DurableObject {
       }
     }, envNum(this.env, 'FEED_DEBOUNCE_MS', DEFAULTS.feedDebounceMs))
   }
+
+  // Drop feed entries matching `pred` and re-broadcast. Used when consent is
+// withdrawn or an identity is deleted: those entries have already reached every
+// connected client, so leaving them to age out of the bounded window is not the
+// same as retracting them.
+_retractFeed(pred) {
+  let purged = 0
+  for (let i = this.feed.length - 1; i >= 0; i--) {
+    if (pred(this.feed[i])) {
+      this.feed.splice(i, 1)
+      purged++
+    }
+  }
+  if (purged) {
+    this._markFeedDirty()
+    this._flushFeed()
+  }
+  return purged
+}
 
   _flushFeed() {
     if (!this._feedDirty) return
