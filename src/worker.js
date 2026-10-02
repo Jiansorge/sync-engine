@@ -21,7 +21,7 @@ import {
 } from './protocol.js'
 import { shardCount, shardName, allShardNames } from './shard.js'
 import { dayKey, activeDayFromStats, mergeSummaries, sanitizeStats, hasLifetimeStats } from './stats.js'
-import { shouldAllowUpgrade, createUpgradeThrottle, throttleKey, safeEqual } from './security.js'
+import { shouldAllowUpgrade, createUpgradeThrottle, throttleKey, safeEqual, corsHeaders } from './security.js'
 
 // ---- limits (env overrides where noted) ----
 const MAX_WS_MSG = 65536 // raw bytes, checked before parsing
@@ -67,7 +67,11 @@ const JSON_HEADERS = {
   'cache-control': 'no-store',
   'x-content-type-options': 'nosniff'
 }
-const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: JSON_HEADERS })
+const json = (obj, status = 200, extraHeaders = null) =>
+  new Response(JSON.stringify(obj), {
+    status,
+    headers: extraHeaders ? { ...JSON_HEADERS, ...extraHeaders } : JSON_HEADERS
+  })
 
 // Durable Object storage coerces a single-key ARRAY key to "people,<id>" when
 // writing, but reading with that same array form looks up a DIFFERENT key and
@@ -234,26 +238,34 @@ export default {
     //
     // The token rides the existing TLS connection, so the raw value is never
     // stored server-side and never leaves the encrypted channel.
+    if (url.pathname === '/delete' && request.method === 'OPTIONS') {
+      // Preflight. The app shell's WebView sends this automatically for a
+      // JSON POST, and without a 2xx answer here the real request is never
+      // made at all - which is why deletion looked like "offline" on Android.
+      return new Response(null, { status: 204, headers: corsHeaders(request.headers.get('Origin'), env) })
+    }
+
     if (url.pathname === '/delete' && request.method === 'POST') {
+      const cors = corsHeaders(request.headers.get('Origin'), env)
       const ip = request.headers.get('CF-Connecting-IP') || 'unknown'
       // Tighter than the read path: this is destructive and irreversible, so it
       // gets its own small budget to blunt both guessing and abuse.
       if (httpRateLimited(ip + ':del', envNum(env, 'DELETE_RATE_MAX', 5), envNum(env, 'DELETE_RATE_WINDOW_MS', 60000))) {
-        return json({ ok: false, error: 'rate_limited' }, 429)
+        return json({ ok: false, error: 'rate_limited' }, 429, cors)
       }
       const origin = request.headers.get('Origin')
       if (origin && !shouldAllowUpgrade(origin, env.ALLOWED_ORIGINS, request.url)) {
-        return json({ ok: false, error: 'forbidden' }, 403)
+        return json({ ok: false, error: 'forbidden' }, 403, cors)
       }
       let body
       try {
         body = await request.json()
       } catch {
-        return json({ ok: false, error: 'bad_request' }, 400)
+        return json({ ok: false, error: 'bad_request' }, 400, cors)
       }
       const anonId = typeof body?.anonId === 'string' ? body.anonId.slice(0, 64) : ''
       const token = typeof body?.token === 'string' ? body.token.slice(0, 128) : ''
-      if (!anonId || !token) return json({ ok: false, error: 'bad_request' }, 400)
+      if (!anonId || !token) return json({ ok: false, error: 'bad_request' }, 400, cors)
 
       // Records are sharded by the user's location cell, but a delete request
       // only knows the anonId - there is no cell in it, and an anonId is not
@@ -289,16 +301,16 @@ export default {
           ok: true,
           deleted: true,
           withdrawn: results.some((r) => r && r.ok && r.withdrawn)
-        })
+        }, 200, cors)
       }
       // Do not paper over a real fault as "not found": that would tell a user
       // their data is gone when it is still on the server.
       const fault = results.find((r) => r && r.error && r.error !== 'not_found')
       if (fault) {
         const status = fault.error === 'bad_request' ? 400 : fault.error === 'rate_limited' ? 429 : 503
-        return json({ ok: false, error: fault.error }, status)
+        return json({ ok: false, error: fault.error }, status, cors)
       }
-      return json({ ok: false, error: 'not_found' }, 404)
+      return json({ ok: false, error: 'not_found' }, 404, cors)
     }
 
     return new Response('Not found', { status: 404 })

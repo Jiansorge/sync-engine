@@ -53,8 +53,61 @@ export function isSameOrigin(requestUrl, originHeader) {
 //   - otherwise  → same-origin only
 export function shouldAllowUpgrade(originHeader, allowedCsv, requestUrl) {
   if (!originHeader) return true
+  // Capacitor's WebView is NOT a native networking client: it is a browser, so
+  // it always sends an Origin header, and the header is an OPAQUE origin
+  // ("capacitor://localhost") that normalises to null. The no-Origin branch
+  // above therefore never applies to our own app, and with an allow-list
+  // configured the app was locked out of its own socket.
+  //
+  // Compare that one origin as a literal string. Matching it through the
+  // normaliser is exactly what must NOT happen: null === null would admit
+  // every opaque origin on the internet, which is the cross-site WebSocket
+  // hijack the normaliser exists to prevent.
+  if (originHeader === NATIVE_APP_ORIGIN) return true
   if (allowedCsv) return allowOrigin(originHeader, allowedCsv)
   return isSameOrigin(requestUrl, originHeader)
+}
+
+// The origin a Capacitor app shell reports. Must match exactly, case included:
+// it is the one opaque origin we own and are choosing to admit.
+const NATIVE_APP_ORIGIN = 'capacitor://localhost'
+
+// CORS for the app shell.
+//
+// The Capacitor WebView runs on an opaque origin (capacitor://localhost), so
+// every request it makes to this Worker is cross-origin. Without these headers
+// the browser blocks the response before the app sees it - and a blocked fetch
+// is indistinguishable from being offline, so deletion silently reported
+// "could not reach the server" and never deleted anything on Android.
+//
+// Echoing the caller's Origin back is safe here because /delete is
+// authenticated by the deleteToken, not by the origin: an attacker who could
+// make a victim browser issue the request still cannot supply the token.
+export function corsHeaders(originHeader, env) {
+  const allowed = env && env.ALLOWED_ORIGINS
+  const list = String(allowed || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  // Only origins we actually recognise get the header echoed. Anything else
+  // gets no CORS header at all, which is the browser's default deny.
+  const ok =
+    originHeader === NATIVE_APP_ORIGIN ||
+    list.some((u) => {
+      try {
+        return new URL(u).origin === new URL(originHeader).origin
+      } catch {
+        return false
+      }
+    })
+  if (!ok) return {}
+  return {
+    'access-control-allow-origin': originHeader,
+    'access-control-allow-methods': 'GET,POST,OPTIONS',
+    'access-control-allow-headers': 'content-type',
+    'access-control-max-age': '86400',
+    vary: 'Origin'
+  }
 }
 
 // Per-connection message budget: `max` messages per rolling `windowMs`.
