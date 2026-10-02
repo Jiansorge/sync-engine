@@ -84,34 +84,45 @@ const stats = {
 }
 
 describe('the Android app shell', () => {
-  // These are the cases a browser or a Node client never exercises, and they
-  // are the ones the Play build actually depends on. Found by running the real
-  // app on a Pixel: the WebSocket upgrade was refused and every fetch came back
-  // as "Failed to fetch", so deletion silently reported "offline" on Android
-  // and had never worked there at all.
-  const NATIVE = 'capacitor://localhost'
-  const ALLOWED = 'https://joining-palms.app,https://www.joining-palms.app'
+  // Found by installing the app on a Pixel. Both failures here are invisible to
+  // the rest of the suite, because it only ever exercises a browser origin and
+  // a Node client that sends no Origin at all.
+  //
+  // The app shell is served from https://localhost, because capacitor.config
+  // sets androidScheme:https. That matters: the previous scheme
+  // (capacitor://) is a non-special scheme, so it is an OPAQUE origin, and
+  // browsers serialise an opaque origin's header as the literal string "null".
+  const SHELL = 'https://localhost'
 
   it('admits the WebSocket upgrade from the app shell', async () => {
     const res = await exports.default.fetch('http://sync-engine.local/?cell=1,2', {
-      headers: { Upgrade: 'websocket', Connection: 'Upgrade', Origin: NATIVE }
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade', Origin: SHELL }
     })
     expect(res.status).toBe(101)
   })
 
-  it('still refuses an unrecognised origin', async () => {
+  it('REFUSES the opaque origin "null", even though our own app used to send it', async () => {
+    // The trap this guards. "null" is what the app sent before androidScheme
+    // was changed, and the tempting fix is to allow-list it - which would let
+    // every sandboxed iframe, file:// page and data: document on the internet
+    // open a WebSocket here. The app must fix its own origin instead, which it
+    // now does. So "null" stays refused, permanently.
     const res = await exports.default.fetch('http://sync-engine.local/?cell=1,3', {
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade', Origin: 'null' }
+    })
+    expect(res.status).toBe(403)
+  })
+
+  it('still refuses an unrecognised origin', async () => {
+    const res = await exports.default.fetch('http://sync-engine.local/?cell=1,4', {
       headers: { Upgrade: 'websocket', Connection: 'Upgrade', Origin: 'https://evil.example' }
     })
     expect(res.status).toBe(403)
   })
 
-  it('still refuses an arbitrary OPAQUE origin (no cross-site hijack)', async () => {
-    // The whole reason capacitor:// is compared literally rather than through
-    // the origin normaliser: normalising both sides yields null === null, which
-    // would admit every opaque origin on the internet.
-    for (const origin of ['null', 'file://', 'some-app://localhost', 'capacitor://evil']) {
-      const res = await exports.default.fetch('http://sync-engine.local/?cell=1,4', {
+  it('still refuses other opaque schemes', async () => {
+    for (const origin of ['file://', 'some-app://localhost', 'capacitor://localhost', 'capacitor://']) {
+      const res = await exports.default.fetch('http://sync-engine.local/?cell=1,5', {
         headers: { Upgrade: 'websocket', Connection: 'Upgrade', Origin: origin }
       })
       expect(res.status, `origin ${origin} must be refused`).toBe(403)
@@ -121,10 +132,10 @@ describe('the Android app shell', () => {
   it('answers the preflight so the browser will make the real request', async () => {
     const res = await exports.default.fetch('http://sync-engine.local/delete', {
       method: 'OPTIONS',
-      headers: { Origin: NATIVE, 'access-control-request-method': 'POST' }
+      headers: { Origin: SHELL, 'access-control-request-method': 'POST' }
     })
     expect(res.status).toBe(204)
-    expect(res.headers.get('access-control-allow-origin')).toBe(NATIVE)
+    expect(res.headers.get('access-control-allow-origin')).toBe(SHELL)
     expect(res.headers.get('access-control-allow-methods')).toContain('POST')
     expect(res.headers.get('access-control-allow-headers')).toContain('content-type')
   })
@@ -133,40 +144,54 @@ describe('the Android app shell', () => {
     // A blocked body is indistinguishable from being offline, so a missing
     // header on any branch reads to the client as "could not reach the server".
     const cases = [
-      { body: { anonId: 'cors-a', token: 'tok-a' }, want: 404 }, // not_found
-      { body: { anonId: 'cors-b' }, want: 400 }, // bad_request
+      { body: { anonId: 'cors-a', token: 'tok-a' }, want: 404 },
+      { body: { anonId: 'cors-b' }, want: 400 },
       { body: {}, want: 400 }
     ]
     for (const c of cases) {
       const res = await exports.default.fetch('http://sync-engine.local/delete', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', Origin: NATIVE, 'CF-Connecting-IP': nextIp() },
+        headers: { 'content-type': 'application/json', Origin: SHELL, 'CF-Connecting-IP': nextIp() },
         body: JSON.stringify(c.body)
       })
       expect(res.status).toBe(c.want)
-      expect(res.headers.get('access-control-allow-origin'), `body ${JSON.stringify(c.body)}`).toBe(NATIVE)
+      expect(res.headers.get('access-control-allow-origin'), JSON.stringify(c.body)).toBe(SHELL)
     }
   })
 
   it('sends no CORS header to an origin we do not recognise', async () => {
-    const res = await exports.default.fetch('http://sync-engine.local/delete', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', Origin: 'https://evil.example', 'CF-Connecting-IP': nextIp() },
-      body: JSON.stringify({ anonId: 'x', token: 'y' })
-    })
-    expect(res.headers.get('access-control-allow-origin')).toBeNull()
+    for (const origin of ['https://evil.example', 'null']) {
+      const res = await exports.default.fetch('http://sync-engine.local/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Origin: origin, 'CF-Connecting-IP': nextIp() },
+        body: JSON.stringify({ anonId: 'x', token: 'y' })
+      })
+      expect(res.headers.get('access-control-allow-origin'), `origin ${origin}`).toBeNull()
+    }
   })
 
-  it('admits the app shell for /delete even though the route has its own check', async () => {
-    const res = await exports.default.fetch('http://sync-engine.local/delete', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', Origin: NATIVE, 'CF-Connecting-IP': nextIp() },
-      body: JSON.stringify({ anonId: 'cors-c', token: 'tok-c' })
-    })
-    expect(res.status).toBe(404) // not_found, i.e. not "forbidden"
+  it('the allow-list the Worker actually receives admits the app shell', async () => {
+    // Assert on the real binding rather than re-reading wrangler.toml: this is
+    // the value production runs with, and it also proves vitest.config.js is
+    // wired to that file instead of a hardcoded string. (The workers pool has a
+    // virtualised cwd, so reading the file from inside a test does not work.)
+    const list = String(env.ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    expect(list.length).toBeGreaterThan(0)
+    expect(list).toContain('https://localhost')
+    // The trap must stay closed: "null" is not an origin we own.
+    expect(list).not.toContain('null')
+    // Every entry must be a real, normalisable origin. An opaque scheme would
+    // normalise to null and be widened into "any opaque origin" by the
+    // allow-list, which is the hijack this all guards against.
+    for (const o of list) {
+      expect(new URL(o).origin, `${o} must have a normalisable origin`).not.toBe('null')
+    }
+    // And the production hosts are still there, not replaced by the app shell.
+    expect(list).toContain('https://joining-palms.app')
   })
-
-  void ALLOWED
 })
 
 describe('deletion ordering and re-creation', () => {

@@ -74,7 +74,12 @@ HTTP_RATE_MAX = 60
 HTTP_RATE_WINDOW_MS = 10000
 
 # Deployable origins for the WS upgrade (same-origin default covers these anyway).
-ALLOWED_ORIGINS = "https://joining-palms.app,https://www.joining-palms.app,capacitor://localhost"
+# https://localhost is the Capacitor app shell on Android. It is a REAL origin -
+# capacitor.config sets androidScheme:https for exactly this reason - so it can be
+# allow-listed exactly. Do NOT add "null" here: every opaque origin on the
+# internet serialises its Origin header that way, so allowing it would let any
+# site open a WebSocket to this engine and submit a deletion request.
+ALLOWED_ORIGINS = "https://joining-palms.app,https://www.joining-palms.app,https://localhost"
 
 # Deter socket-churn abuse (botnets inflating people/feed + DO CPU): max new
 # WS upgrades per hashed peer IP per window. Raw IPs are never stored — only a

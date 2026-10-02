@@ -53,46 +53,50 @@ export function isSameOrigin(requestUrl, originHeader) {
 //   - otherwise  → same-origin only
 export function shouldAllowUpgrade(originHeader, allowedCsv, requestUrl) {
   if (!originHeader) return true
-  // Capacitor's WebView is NOT a native networking client: it is a browser, so
-  // it always sends an Origin header, and the header is an OPAQUE origin
-  // ("capacitor://localhost") that normalises to null. The no-Origin branch
-  // above therefore never applies to our own app, and with an allow-list
-  // configured the app was locked out of its own socket.
-  //
-  // Compare that one origin as a literal string. Matching it through the
-  // normaliser is exactly what must NOT happen: null === null would admit
-  // every opaque origin on the internet, which is the cross-site WebSocket
-  // hijack the normaliser exists to prevent.
-  if (originHeader === NATIVE_APP_ORIGIN) return true
   if (allowedCsv) return allowOrigin(originHeader, allowedCsv)
   return isSameOrigin(requestUrl, originHeader)
 }
 
-// The origin a Capacitor app shell reports. Must match exactly, case included:
-// it is the one opaque origin we own and are choosing to admit.
-const NATIVE_APP_ORIGIN = 'capacitor://localhost'
+// Deliberately NO special case for the app shell's own origin.
+//
+// The first attempt here compared "capacitor://localhost" literally, on the
+// reasoning that Capacitor's WebView reports that origin. It does not: a
+// non-special scheme is an OPAQUE origin, so every browser that serves the app
+// from it serialises the header as the literal string "null". Verified on a
+// Pixel - the device sent "null", and the upgrade was refused.
+//
+// Admitting "null" is not an option: every opaque origin on the internet sends
+// it - sandboxed iframes, file:// documents, data: URLs - so allowing it would
+// hand any site a cross-site WebSocket hijack against our own app.
+//
+// The fix belongs in the app, not here: Capacitor's androidScheme is set to
+// "https", so the WebView is served from https://localhost, a REAL origin that
+// normalises correctly and can be allow-listed exactly. That is the entry in
+// ALLOWED_ORIGINS, and it is why there is nothing special to do in this file.
 
 // CORS for the app shell.
 //
-// The Capacitor WebView runs on an opaque origin (capacitor://localhost), so
-// every request it makes to this Worker is cross-origin. Without these headers
-// the browser blocks the response before the app sees it - and a blocked fetch
-// is indistinguishable from being offline, so deletion silently reported
-// "could not reach the server" and never deleted anything on Android.
+// The Android WebView is served from https://localhost (androidScheme is
+// "https" for exactly this reason), which is a real origin and therefore
+// allow-listable. Every request it makes to this Worker is still cross-origin,
+// so without these headers the browser blocks the response before the app sees
+// it - and a blocked fetch is indistinguishable from being offline, so
+// deletion silently reported "could not reach the server" and deleted nothing.
 //
-// Echoing the caller's Origin back is safe here because /delete is
-// authenticated by the deleteToken, not by the origin: an attacker who could
-// make a victim browser issue the request still cannot supply the token.
+// Echoing the caller's Origin back is safe because /delete is authenticated by
+// the deleteToken, not by the origin: a site that could make a victim's browser
+// issue the request still cannot supply the token.
 export function corsHeaders(originHeader, env) {
-  const allowed = env && env.ALLOWED_ORIGINS
-  const list = String(allowed || '')
+  const list = String((env && env.ALLOWED_ORIGINS) || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
-  // Only origins we actually recognise get the header echoed. Anything else
-  // gets no CORS header at all, which is the browser's default deny.
+  // Only origins we recognise get the header echoed. Anything else gets none
+  // at all, which is the browser's default deny. Never match "null": that
+  // string is sent by every opaque origin, not just ours.
   const ok =
-    originHeader === NATIVE_APP_ORIGIN ||
+    !!originHeader &&
+    originHeader !== 'null' &&
     list.some((u) => {
       try {
         return new URL(u).origin === new URL(originHeader).origin
