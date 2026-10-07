@@ -1095,47 +1095,59 @@ _retractFeed(pred) {
     if (this._flushPromise) return this._flushPromise
     this._flushPromise = (async () => {
       if (!this._loaded) return
-      const jobs = []
-      const totalsDirty = this._totalsDirty
-      const secondsDirty = this._secondsDirty
-      const seenDirty = this._seenDirty
-      const countsDirty = this._countsDirty
-      const startsDirty = this._startsDirty
-      if (totalsDirty) {
+      // Snapshot first, write second.
+      //
+      // The values are captured here, before any await, because the engine keeps
+      // mutating them while the write is in flight - that is why _totals needs a
+      // structuredClone rather than a shallow copy. _anonSeen and _counts are
+      // already safe to copy directly: one holds numbers in a fresh array, the
+      // other is a flat numeric map.
+      const entries = []
+      if (this._totalsDirty) {
         this._totalsDirty = false
-        // structuredClone, not {...this._totals}: the shallow copy left
-        // prayers/spirit maps by reference, and _countTotal keeps mutating them
-        // while the put is in flight, so what actually landed was
-        // non-deterministic. Clone first so the write is an exact snapshot.
-        jobs.push(this.ctx.storage.put('totals', structuredClone(this._totals)))
+        entries.push(['totals', structuredClone(this._totals)])
       }
-      if (secondsDirty) {
+      if (this._secondsDirty) {
         this._secondsDirty = false
-        jobs.push(this.ctx.storage.put('totalPrayerSeconds', this._totalSeconds))
+        entries.push(['totalPrayerSeconds', this._totalSeconds])
       }
-      if (seenDirty) {
+      if (this._seenDirty) {
         this._seenDirty = false
-        jobs.push(this.ctx.storage.put('anonSeen', Array.from(this._anonSeen.entries())))
+        entries.push(['anonSeen', Array.from(this._anonSeen.entries())])
       }
-      if (countsDirty) {
+      if (this._countsDirty) {
         this._countsDirty = false
-        jobs.push(this.ctx.storage.put('counts', { ...this._counts }))
+        entries.push(['counts', { ...this._counts }])
       }
-      if (startsDirty) {
+      if (this._startsDirty) {
         this._startsDirty = false
-        jobs.push(
-          this.ctx.storage.put('recentStarts', Array.from(this._recentStarts.entries()))
-        )
+        entries.push(['recentStarts', Array.from(this._recentStarts.entries())])
       }
-      if (!jobs.length) return
+      if (!entries.length) return
+      // One transaction, not five parallel puts.
+      //
+      // These five keys are read back together on load and describe one moment of
+      // the world: the lifetime total, the seconds, who has been seen, the
+      // per-prayer counts and the recent-start dedup set. Writing them with
+      // Promise.all means a failure part-way through leaves some of them
+      // advanced and the rest stale, and the DO happily restarts into that
+      // half-written state - totals that disagree with the counts they were
+      // computed from. transaction() makes the set all-or-nothing.
+      const rearm = () => {
+        if (entries.some(([k]) => k === 'totals')) this._totalsDirty = true
+        if (entries.some(([k]) => k === 'totalPrayerSeconds')) this._secondsDirty = true
+        if (entries.some(([k]) => k === 'anonSeen')) this._seenDirty = true
+        if (entries.some(([k]) => k === 'counts')) this._countsDirty = true
+        if (entries.some(([k]) => k === 'recentStarts')) this._startsDirty = true
+      }
       try {
-        await Promise.all(jobs)
+        await this.ctx.storage.transaction(async (txn) => {
+          for (const [key, value] of entries) await txn.put(key, value)
+        })
       } catch (err) {
-        if (totalsDirty) this._totalsDirty = true
-        if (secondsDirty) this._secondsDirty = true
-        if (seenDirty) this._seenDirty = true
-        if (countsDirty) this._countsDirty = true
-        if (startsDirty) this._startsDirty = true
+        // Put them back in the dirty set so the next flush retries the whole set
+        // rather than leaving the counters permanently one flush behind.
+        rearm()
         console.error('sync-engine: storage flush failed', err && err.message)
       }
     })()
