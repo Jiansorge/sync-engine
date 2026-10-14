@@ -10,21 +10,36 @@
 // config-stripped assets-only build lands on joining-palms.app roughly 40 seconds
 // later, with no fetch handler, no bindings, a deploy-day compatibility_date and
 // SPA not-found handling. Observed and reproduced on 2026-10-14 at 19:30:58Z,
-// 45-45 seconds after five separate pushes. The uptime workflow only runs about
-// every five hours, so the window is real: production serves the SPA shell for
-// /health, /stats and the WebSocket handshake - meaning presence, prayer lights,
-// totals and anonymous sync are all down - and the first sign of it is a failure
-// email hours later.
+// 39 seconds after CI run #263 started. The uptime workflow only runs about every
+// five hours, so the window is real: production serves the SPA shell for /health,
+// /stats and the WebSocket handshake - meaning presence, prayer lights, totals and
+// anonymous sync are all down - and the first sign of it is a failure email hours
+// later.
 //
 // deploy-dispatch usually overwrites it about nine minutes later with a good
 // deploy. When CI is red, nothing overwrites it, and it stays broken. That is the
 // shape of the outage this prevents.
 //
-// What it deliberately does NOT do is pretend to know the cause. The stripped
-// upload is not from this repo, not from deploy-dispatch, and not from Pages
-// (checked: the only Pages project is portfolio-2026). Find it in the Cloudflare
-// dashboard - Workers -> Builds, or a Git integration on the account - because
-// this script makes the outage survivable, not gone.
+// What it is, narrowed as far as the available API allows:
+//
+//   ruled out   deploy-dispatch - skipped on both bad runs, and produced the
+//               correct version on #263
+//   ruled out   Pages - the account's only Pages project is portfolio-2026,
+//               no Git provider, unrelated domain
+//   ruled out   this repo - nothing in its scripts references wrangler or the
+//               Cloudflare API
+//   identified  by assets fingerprint. sync-engine/public/ ships a _headers file
+//               (the CSP and cache headers); the stripped version carries NO
+//               _headers, and prayer-earth's dist/ has no _headers in it. So the
+//               upload is NOT the Worker package - it is prayer-earth's own build
+//               output, deployed as static assets with no worker attached, under
+//               the same script name. That is the fingerprint of a Workers Builds
+//               connection on the prayer-earth repository, whose build config has
+//               no `main`.
+//
+// The Workers Builds config endpoint 401s on the wrangler OAuth token, so it
+// cannot be read or disabled from here. It needs an API token with
+// Account | Workers Builds | Read (or Edit) on the account.
 
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
