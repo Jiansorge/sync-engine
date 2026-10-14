@@ -31,6 +31,8 @@
     "usage": "node scripts/check-usage.mjs",
     "verify": "node scripts/verify.mjs",
     "verify:version": "node scripts/verify-version.mjs",
+    "repair": "node scripts/repair.mjs",
+    "repair:check": "node scripts/repair.mjs --check",
     "test": "vitest run",
     "smoke": "node scripts/smoke-ws.mjs"
   },
