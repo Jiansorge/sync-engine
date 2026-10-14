@@ -147,6 +147,31 @@ async function main() {
     log('      For a hardened multi-domain setup, set ALLOWED_ORIGINS in wrangler.toml.')
   }
 
+  // Remember which version was serving BEFORE we replace it. The verification
+  // below can tell us the deploy is wrong, but on its own that only means we
+  // print an error and leave production broken - which is precisely what has been
+  // happening: a deploy ships a config-stripped assets upload, verification
+  // catches it correctly, public/ is restored, and the Worker stays down until
+  // somebody notices the uptime email. This is the version to put back.
+  //
+  // Only recorded when the live version is ALREADY good. Rolling back to a
+  // version that was itself stripped is not a rollback, it is a second outage.
+  let previousVersionId = null
+  try {
+    const before = await checkLiveVersionContract({ requireAuth: !noAuth })
+    if (before.ok && before.versionId) {
+      previousVersionId = before.versionId
+      ok(`previous live version ${previousVersionId} recorded for rollback`)
+    } else {
+      log('NOTE: the live version does not currently carry the Worker contract,')
+      log('      so there is no known-good version to roll back to. Deploying anyway;')
+      log('      if this deploy fails verification there will be nothing to undo.')
+    }
+  } catch (err) {
+    log(`NOTE: could not read the current live version (${err && err.message}).`)
+    log('      Rollback-on-failure will be unavailable; deploying anyway.')
+  }
+
   // 5. Deploy (or dry-run / stage-only)
   if (stageOnly) {
     log('Stage-only — no deploy. Rollback backup: ' + path.relative(ROOT, backup))
@@ -163,9 +188,24 @@ async function main() {
   try {
     run(npmCmd, ['run', 'deploy'], { cwd: ROOT })
   } catch (err) {
-    // A failed deploy must not leave public/ staged with a build the live
-    // Worker doesn't have — restore the backup so the repo matches production.
-    log('Deploy failed — restoring the previous public/ build.')
+    // A deploy that dies partway can still have replaced the live version, so this
+    // is not just a "the upload never landed" case. Roll back first, then restore
+    // the repo, and verify the rollback rather than trusting that it worked.
+    log('Deploy failed.')
+    if (previousVersionId) {
+      log(`Rolling the Worker back to ${previousVersionId}…`)
+      try {
+        run(npxCmd(), ['wrangler', 'rollback', previousVersionId], { cwd: ROOT, env: process.env })
+        const after = await checkLiveVersionContract({ requireAuth: !noAuth })
+        ok(after.ok
+          ? `live version ${after.versionId} carries the full Worker contract again`
+          : `rollback left version ${after.versionId} still violating the contract`)
+      } catch (rollbackErr) {
+        log(`! rollback failed: ${rollbackErr && rollbackErr.message}`)
+        log('  production may be DOWN - page a human')
+      }
+    }
+    log('Restoring the previous public/ build.')
     try {
       rmSync(PUBLIC, { recursive: true, force: true })
       cpSync(backup, PUBLIC, { recursive: true })
@@ -235,6 +275,33 @@ async function main() {
   }
   if (verifyFail) {
     log(`VERIFICATION FAILED — ${verifyFail}`)
+    // Put the old Worker back BEFORE touching public/. Restoring the repo first
+    // and then failing leaves the live Worker broken and the repo healthy, which
+    // is the state that is hardest to reason about and easiest to leave in place
+    // for days. Heal the live system first, then the repo.
+    if (previousVersionId) {
+      log(`Rolling the Worker back to ${previousVersionId}…`)
+      try {
+        run(npxCmd(), ['wrangler', 'rollback', previousVersionId], { cwd: ROOT, env: process.env })
+        ok(`rolled back to ${previousVersionId}`)
+        // Confirm the rollback actually restored service rather than assuming it.
+        // A rollback that silently fails is worse than no rollback, because it
+        // converts a visible outage into an invisible one.
+        const after = await checkLiveVersionContract({ requireAuth: !noAuth })
+        if (after.ok) {
+          ok(`live version ${after.versionId} carries the full Worker contract again`)
+        } else {
+          for (const reason of after.reasons || []) log(`  ✗ still: ${reason}`)
+          fail('rollback did not restore a healthy Worker', 'production is still down - page a human')
+        }
+      } catch (err) {
+        fail('rollback failed', `${err && err.message} — production is still down, page a human`)
+      }
+    } else {
+      log('No known-good version was recorded, so there is nothing to roll back to.')
+      log('Production is DOWN. Redeploy a good Worker by hand:')
+      log('  node scripts/deploy-app.mjs --skip-tests')
+    }
     log('Restoring the previous public/ build (the live Worker now diverges from repo).')
     try {
       rmSync(PUBLIC, { recursive: true, force: true })
