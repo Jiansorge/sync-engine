@@ -87,6 +87,15 @@ jobs:
           if [ "$CONTRACT_OK" = "no" ]; then
             if [ -n "$detail" ]; then detail="$detail; live version violates Worker contract"; else detail="live version violates Worker contract"; fi
           fi
+          # Create the label before using it. `gh issue create --label uptime`
+          # FAILS when the label does not exist, and that failure is the whole
+          # step - so the alert was silently lost. It was: the label was never
+          # created on the repo, which is why every failing run between 2026-10-13
+          # and 2026-10-14 produced a bare Actions failure email and no issue at
+          # all. A monitoring path that depends on a human having set a label up
+          # first is a monitoring path that does not exist.
+          gh label create uptime --repo "$GITHUB_REPOSITORY" \
+            --color D93F0B --description "Automated health-check failure for joining-palms.app" 2>/dev/null || true
           exists=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label uptime --json number -q '.[0].number' 2>/dev/null || true)
           if [ -z "$exists" ]; then
             gh issue create --repo "$GITHUB_REPOSITORY" \

@@ -11,6 +11,16 @@
 //   1. /         → edge 1 hour, browser 5 min   (app shell — drops repeat visits)
 //   2. /assets/* → edge 1 month, browser 1 year  (hashed filenames — safe)
 //   3. /audio/*  → edge 1 day, browser 1 day       (short so replacements propagate)
+//   4. /health, /stats → BYPASS cache entirely      (see below)
+//
+// (4) is the one that matters and the one that was missing. /health is how the
+// uptime check learns whether the Worker is serving, and for a long time the
+// only thing protecting it was run_worker_first in wrangler.toml - correct while
+// the Worker is serving, and useless the moment it is not: a cached SPA shell
+// then answers /health for as long as the TTL lasts, so a dead Worker looks
+// healthy and a healthy Worker can look dead depending on which PoP still holds
+// a stale copy. A monitor that can be answered by a cache cannot be a monitor.
+// Bypassing the cache removes the possibility rather than narrowing it.
 
 const ZONE_NAME = process.env.CF_ZONE_NAME || 'joining-palms.app'
 const TOKEN = process.env.CF_API_TOKEN
@@ -88,16 +98,39 @@ const rules = [
       },
       browser_ttl: { mode: 'override_origin', default: 86400 }
     }
+  },
+  {
+    action: 'set_cache_settings',
+    expression: `(http.host eq "${ZONE_NAME}" and (http.request.uri.path eq "/health" or http.request.uri.path eq "/stats"))`,
+    description: 'Health + stats — never cache (a cached answer is not a health check)',
+    action_parameters: { cache: false }
   }
 ]
 
-const res = await api(`/zones/${zone.id}/rulesets/phases/http_request_cache_settings/entrypoint`, {
+// Merge rather than replace. The ruleset entrypoint PUT below REPLACES the whole
+// cache-settings ruleset, so a plain overwrite would delete any rule someone added
+// in the dashboard - including the /health bypass this script exists to add, the
+// next time it ran for an unrelated reason. Rules this script manages are
+// identified by description and updated; everything else is carried over
+// untouched.
+const ENTRYPOINT = `/zones/${zone.id}/rulesets/phases/http_request_cache_settings/entrypoint`
+const existing = (await api(ENTRYPOINT)).result?.rules || []
+const ours = (r) => MANAGED.has(r.description)
+const MANAGED = new Set(rules.map((r) => r.description))
+const kept = existing.filter((r) => !ours(r.description))
+
+const merged = [...rules.map((r) => ({ ...r })), ...kept]
+const res = await api(ENTRYPOINT, {
   method: 'PUT',
-  body: JSON.stringify({ rules })
+  body: JSON.stringify({ rules: merged })
 })
 
-console.log('Cache Rules applied:')
+console.log(`Cache Rules applied (${rules.length} managed, ${kept.length} carried over):`)
 for (const r of res.result.rules) {
   console.log(`  - ${r.description}  [${r.action}]`)
+}
+if (kept.length) {
+  console.log('\nCarried over unchanged (not managed by this script):')
+  for (const r of kept) console.log(`  - ${r.description || '(no description)'}`)
 }
 console.log('\nTip: purge the zone cache once (dashboard → Caching → Purge → Purge everything) so the new headers take effect immediately.')
