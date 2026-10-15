@@ -16,10 +16,24 @@ const ALL = process.argv.includes('--all')
 // Explicit URL paths (e.g. --paths="/health /stats /"). Purges only those files,
 // used by the deploy gate after a routing change so a stale cached SPA HTML shell
 // can never keep answering /health + /stats instead of Worker JSON.
-const pathsArg = process.argv.find((a) => a.startsWith('--paths='))
-const PATHS = pathsArg
-  ? pathsArg.slice('--paths='.length).split(' ').filter(Boolean).map((p) => `https://${ZONE_NAME}${p}`)
-  : []
+//
+// Both --paths="/a /b" and --paths=/a /b have to work. The second is what you
+// actually type, and an unquoted list splits into separate argv entries, so
+// `--paths=/ /health /stats` left PATHS holding only "/" and silently purged
+// nothing else — the exact set this gate exists to clear. Everything after
+// --paths= up to the next --flag is collected now.
+const PATHS = []
+{
+  const argv = process.argv.slice(2)
+  const at = argv.findIndex((a) => a.startsWith('--paths='))
+  if (at >= 0) {
+    const inline = argv[at].slice('--paths='.length).trim()
+    if (inline) PATHS.push(...inline.split(/\s+/).filter(Boolean))
+    for (let i = at + 1; i < argv.length && !argv[i].startsWith('--'); i++) {
+      PATHS.push(...argv[i].split(/\s+/).filter(Boolean))
+    }
+  }
+}
 
 if (!TOKEN) {
   console.error('Set CF_API_TOKEN (a token with Zone > Cache > Purge).')
@@ -46,12 +60,21 @@ if (!zone) {
   process.exit(1)
 }
 
+const FILES = PATHS.map((p) => `https://${ZONE_NAME}${p.startsWith('/') ? p : '/' + p}`)
 const body = ALL
   ? { purge_everything: true }
-  : { files: PATHS.length ? PATHS : [`https://${ZONE_NAME}/audio/*`] }
+  : { files: FILES.length ? FILES : [`https://${ZONE_NAME}/audio/*`] }
 
 const res = await api(`/zones/${zone.id}/purge_cache`, { method: 'POST', body: JSON.stringify(body) })
-console.log(ALL ? 'Purged the entire zone cache.' : `Purged /audio/* on ${ZONE_NAME}.`)
-if (!ALL) {
+// Report what was actually purged. The message used to say "/audio/*" no matter
+// what was passed, which is the kind of small lie that makes someone distrust
+// every other line this prints - including the ones that matter after a routing
+// change, when "did the purge include /health?" is the whole question.
+if (ALL) {
+  console.log('Purged the entire zone cache.')
+} else if (PATHS.length) {
+  console.log(`Purged ${PATHS.length} path(s) on ${ZONE_NAME}: ${PATHS.join(', ')}`)
+} else {
+  console.log(`Purged /audio/* on ${ZONE_NAME}.`)
   console.log('To also refresh the service-worker cache, bump CACHE in prayer-earth/public/sw.js and redeploy.')
 }
