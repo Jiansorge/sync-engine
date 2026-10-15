@@ -83,6 +83,30 @@ async function waitFor(seen, pred, timeout = 4000) {
   throw new Error('timed out waiting for a message')
 }
 
+// Poll a derived view of the Durable Object until `ok` holds on it.
+//
+// A WebSocket frame and a runInDurableObject call are two independent messages
+// arriving at the same object, so a single read straight after send() can win
+// the race and observe the state before the frame was handled. That is what made
+// "retracts a withdrawn name" fail intermittently: the purge does run, just
+// after the one read that asserted it had. Polling removes the ordering
+// assumption without weakening the assertion - on timeout the last view is
+// returned so the caller's expect() still shows what was actually there.
+//
+// It also gives later steps a guarantee they were relying on implicitly: the
+// check that follows compares a feed frame built on another socket against this
+// purge, and two sockets carry no ordering relative to each other.
+async function waitForDo(stub, derive, ok, timeout = 4000) {
+  const t0 = Date.now()
+  let view
+  do {
+    view = await runInDurableObject(stub, (instance) => derive(instance))
+    if (ok(view)) return view
+    await sleep(10)
+  } while (Date.now() - t0 < timeout)
+  return view
+}
+
 describe('SyncRoom over the wire', () => {
   it('answers a keepalive ping with a pong', async () => {
     const ws = await openWs(freshCell())
@@ -207,9 +231,15 @@ describe('SyncRoom over the wire', () => {
     // the broadcasts rather than only inspecting server state.
     // Read the server's own view: the purge must be in effect for every client,
     // which is exactly why a feed left to age out is not equivalent.
+    //
+    // Reading once raced the frame: the withdrawal travels a different path into
+    // the Durable Object than this read does, so the read could arrive first and
+    // see the entry still present. Wait for the purge instead of sampling it.
     const stub = env.SYNC_ROOM.get(shardId(cell))
-    const remaining = await runInDurableObject(stub, async (instance) =>
-      instance.feed.map((f) => f.name)
+    const remaining = await waitForDo(
+      stub,
+      (instance) => instance.feed.map((f) => f.name),
+      (names) => !names.includes('Regrettable Name')
     )
     expect(remaining).not.toContain('Regrettable Name')
 
