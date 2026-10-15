@@ -4,7 +4,11 @@ name: deploy
 # prayer-earth CI passes (repository_dispatch), or manually from this repo.
 #
 # Required repo secrets:
-#   DEPLOY_PAT            — a fine-grained PAT with Contents:read on Jiansorge/prayer-earth
+#   DEPLOY_PAT            — a fine-grained PAT with Contents:read AND Statuses:write
+#                           on Jiansorge/prayer-earth. Statuses:write is what lets
+#                           this workflow report the deploy outcome back onto the
+#                           commit that triggered it; without it the status step
+#                           is skipped with a warning and the deploy is unaffected.
 #   CLOUDFLARE_API_TOKEN  — Cloudflare token with Workers Scripts:Edit + Workers Routes:Edit + Zone:Cache Purge
 #   CLOUDFLARE_ACCOUNT_ID — the Cloudflare account id
 on:
@@ -44,7 +48,23 @@ jobs:
         working-directory: prayer-earth
         run: npm ci --legacy-peer-deps
 
+      # Mark the triggering commit as deploying before any work starts. Without
+      # this the commit sits green until the whole run finishes, so a five
+      # minute deploy is indistinguishable from no deploy at all.
+      - name: Mark the prayer-earth commit as deploying
+        if: github.event.client_payload.sha
+        working-directory: sync-engine
+        env:
+          DEPLOY_PAT: ${{ secrets.DEPLOY_PAT }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          TARGET_RUN_ID: ${{ github.event.client_payload.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/report-deploy-status.mjs
+
       - name: Ship (tests → build app → stage → deploy)
+        id: ship
         working-directory: sync-engine
         env:
           # CF_API_TOKEN: a SEPARATE, zone-scoped token with Zone>Cache>Purge
@@ -54,3 +74,20 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/deploy-app.mjs --no-auth
+
+      # Runs whether or not the ship step succeeded, because a failed deploy is
+      # exactly the case this exists to surface. report-deploy-status.mjs exits 0
+      # on every path, so this cannot turn a failed deploy into a failed report
+      # and hide the original error behind a new one.
+      - name: Report the outcome on the prayer-earth commit
+        if: always() && github.event.client_payload.sha
+        working-directory: sync-engine
+        env:
+          DEPLOY_PAT: ${{ secrets.DEPLOY_PAT }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          TARGET_RUN_ID: ${{ github.event.client_payload.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHIP_CONCLUSION: ${{ steps.ship.conclusion }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/report-deploy-status.mjs
