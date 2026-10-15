@@ -59,7 +59,11 @@ jobs:
           TARGET_SHA: ${{ github.event.client_payload.sha }}
           TARGET_RUN_ID: ${{ github.event.client_payload.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          # The ACCOUNT-scoped token, not CF_API_TOKEN. Naming the live version
+          # means reading Workers deployments, which lives at account scope; the
+          # zone-scoped token gets a 403 there and the status falls back to
+          # "production deployed" with no version in it.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/report-deploy-status.mjs
 
@@ -88,6 +92,9 @@ jobs:
           TARGET_RUN_ID: ${{ github.event.client_payload.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHIP_CONCLUSION: ${{ steps.ship.conclusion }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          # Account-scoped, for the same reason as above: the live version id
+          # comes from the deployments endpoint, which the zone token cannot
+          # read.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/report-deploy-status.mjs
