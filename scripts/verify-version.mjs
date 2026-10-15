@@ -105,9 +105,10 @@ function oauthTokenFromConfigFiles() {
 }
 
 async function resolveCredentials({ requireAuth }) {
-  const token = process.env.CLOUDFLARE_API_TOKEN || oauthTokenFromConfigFiles()
+  const envToken = process.env.CLOUDFLARE_API_TOKEN
+  const token = envToken || oauthTokenFromConfigFiles()
   if (!token) {
-    if (!requireAuth) return { token: null, accountId: null }
+    if (!requireAuth) return { token: null, accountId: null, source: null }
     throw new Error('no Cloudflare credentials (set CLOUDFLARE_API_TOKEN or run `npx wrangler login`)')
   }
   let accountId = process.env.CLOUDFLARE_ACCOUNT_ID
@@ -120,7 +121,10 @@ async function resolveCredentials({ requireAuth }) {
     accountId = accepted?.account?.id ?? j?.result?.[0]?.account?.id
   }
   if (!accountId) throw new Error('could not resolve Cloudflare account id')
-  return { token, accountId }
+  // Which credential we are on decides whether a 401 is recoverable: a token from
+  // the environment is the user's to rotate, while a wrangler OAuth session
+  // expires on its own and wrangler will quietly renew it on the next command.
+  return { token, accountId, source: envToken ? 'env' : 'oauth' }
 }
 
 // ---------------------------------------------------------------------------
@@ -129,10 +133,56 @@ async function resolveCredentials({ requireAuth }) {
 
 async function cfGet(token, url) {
   const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } })
-  if (!r.ok) throw new Error(`Cloudflare ${r.status} for ${url}`)
+  if (!r.ok) {
+    const err = new Error(`Cloudflare ${r.status} for ${url}`)
+    err.status = r.status
+    throw err
+  }
   const j = await r.json()
   if (!j?.success) throw new Error(`Cloudflare error: ${JSON.stringify(j?.errors ?? j)}`)
   return j.result
+}
+
+// Ask wrangler to renew the OAuth session, then pick the refreshed token back up
+// out of the config file it rewrites.
+//
+// The wrangler OAuth token expires on its own schedule (~55 minutes) and only
+// wrangler refreshes it - the config file simply holds whatever wrangler last
+// wrote. Reading that file directly means this script can be handed a token that
+// is minutes from dead, which is exactly the wrong moment to fail: verify-version
+// and repair are what you run when production is already down. Rather than
+// reimplement the refresh (and wrangler's OAuth client id, which is not in the
+// config and would have to be pinned here), call wrangler and let it do the one
+// thing it is good at.
+//
+// Imported lazily because this module is also loaded by the unit tests, which run
+// in the Workers runtime where node:child_process does not exist. The refresh is
+// only ever reached when a live call has already been rejected, in a real shell,
+// so the import never fires where it would break the suite.
+async function refreshOauthViaWrangler() {
+  const { spawnSync } = await import('node:child_process')
+  // Drop the API tokens from the child's environment. repair runs with
+  // CF_API_TOKEN set, and wrangler picks that up ("Using CF_API_TOKEN
+  // environment variable") and tries to authenticate with it instead of the
+  // OAuth session we are here to renew - which fails, because that token is
+  // deliberately zone-scoped and cannot read accounts. Only by handing wrangler
+  // an environment without either token do we get it to renew its own session.
+  const env = { ...process.env }
+  delete env.CF_API_TOKEN
+  delete env.CLOUDFLARE_API_TOKEN
+  const r = spawnSync('npx', ['wrangler', 'whoami'], {
+    encoding: 'utf8',
+    timeout: 180000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+    // npx is a .cmd on Windows and will not exec without a shell.
+    shell: process.platform === 'win32'
+  })
+  if (r.error) throw r.error
+  if (r.status !== 0) {
+    const out = `${r.stdout ?? ''}\n${r.stderr ?? ''}`.replace(/\s+/g, ' ').trim()
+    throw new Error(`wrangler could not renew the OAuth session (exit ${r.status}): ${out.slice(0, 300)}`)
+  }
 }
 
 // The id of the version currently serving 100%. Uses the format wrangler.toml
@@ -168,15 +218,34 @@ export async function checkLiveVersionContract({
   getVersion = liveVersionId,
   getResources = fetchVersionResources
 } = {}) {
-  const credentials = await resolveCredentials({ requireAuth })
+  let credentials = await resolveCredentials({ requireAuth })
   if (!credentials.token) {
     return { ok: true, skipped: 'no Cloudflare credentials available; version-contract check skipped' }
   }
-  const versionId = await getVersion(credentials, script)
-  const resources = await getResources(credentials, script, versionId)
+  let versionId, resources
+  try {
+    ;({ versionId, resources } = await loadVersion(credentials, script, getVersion, getResources))
+  } catch (e) {
+    // A rejected wrangler session is self-healing, so heal it once instead of
+    // reporting a broken production to someone whose production is fine.
+    //
+    // Triggered on 400 as well as 401 because Cloudflare answers 400 for a
+    // rejected OAuth token on this endpoint, not the 401 you would expect - a
+    // session that has gone bad is not reliably signalled as an auth failure.
+    if (!(e?.status === 401 || e?.status === 400) || credentials.source !== 'oauth') throw e
+    await refreshOauthViaWrangler()
+    credentials = await resolveCredentials({ requireAuth })
+    ;({ versionId, resources } = await loadVersion(credentials, script, getVersion, getResources))
+  }
   const expected = expectedContractFromToml()
   const reasons = assertVersionContract(resources, expected)
   return { ok: reasons.length === 0, versionId, reasons, expected }
+}
+
+async function loadVersion(credentials, script, getVersion, getResources) {
+  const versionId = await getVersion(credentials, script)
+  const resources = await getResources(credentials, script, versionId)
+  return { versionId, resources }
 }
 
 // ---------------------------------------------------------------------------
