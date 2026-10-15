@@ -26,6 +26,7 @@
     "ship": "node scripts/deploy-app.mjs",
     "kv:setup": "node scripts/setup-kv.mjs",
     "cache:rules": "node scripts/setup-cache-rules.mjs",
+    "cache:rules:list": "node scripts/list-cache-rules.mjs",
     "cache:purge": "node scripts/purge-cache.mjs",
     "audio:r2:upload": "node scripts/upload-audio-r2.mjs",
     "usage": "node scripts/check-usage.mjs",

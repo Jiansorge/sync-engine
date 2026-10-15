@@ -115,9 +115,25 @@ const rules = [
 // untouched.
 const ENTRYPOINT = `/zones/${zone.id}/rulesets/phases/http_request_cache_settings/entrypoint`
 const existing = (await api(ENTRYPOINT)).result?.rules || []
-const ours = (r) => MANAGED.has(r.description)
 const MANAGED = new Set(rules.map((r) => r.description))
-const kept = existing.filter((r) => !ours(r.description))
+const MANAGED_EXPRESSIONS = new Set(rules.map((r) => r.expression))
+// Two things have to be filtered out, and for different reasons:
+//
+//   a rule this script owns, identified by description — it is about to be
+//   rewritten by the managed copy, so keeping it would duplicate it;
+//
+//   a rule with the same expression as one this script owns, even under a
+//   different description. Someone may have built an equivalent rule by hand,
+//   and a duplicate is worse than a deletion: with two rules on the same path
+//   the later one wins, so the surviving configuration is whichever rule the
+//   UI happens to sort last, not the one you intended to set.
+//
+// This pair existed because the filter above used to read
+// `ours(r.description)` while `ours` itself did `r.description` - handing a
+// string to something expecting a rule. `MANAGED.has(undefined)` is always
+// false, so nothing was ever filtered and every existing rule was carried over
+// on top of its own managed replacement.
+const kept = existing.filter((r) => !MANAGED.has(r.description) && !MANAGED_EXPRESSIONS.has(r.expression))
 
 const merged = [...rules.map((r) => ({ ...r })), ...kept]
 const res = await api(ENTRYPOINT, {
