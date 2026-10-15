@@ -68,11 +68,22 @@ async function liveVersionId() {
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}` },
   })
-  if (!res.ok) return null
+  if (!res.ok) {
+    log(`could not read deployments (HTTP ${res.status}) - the status will carry no version`)
+    return null
+  }
   const body = await res.json().catch(() => null)
-  const list = Array.isArray(body) ? body : (body?.result ?? body?.deployments ?? [])
+  // The envelope is { result: { deployments: [...] } }. Taking `result` as the
+  // list - which is what a first draft did - leaves `list.find` throwing on a
+  // plain object, the catch swallows it, and every status quietly loses its
+  // version. Unwrap first, then look for `.deployments`, matching how
+  // verify-version reads the same endpoint.
+  const inner = body?.result ?? body
+  const list = Array.isArray(inner) ? inner : (inner?.deployments ?? [])
   const live = list.find((d) => d?.versions?.[0]?.percentage === 100) ?? list[0]
-  return live?.versions?.[0]?.version_id ?? null
+  const vid = live?.versions?.[0]?.version_id ?? null
+  if (!vid) log('no version id found in the deployments list')
+  return vid
 }
 
 function describe() {
