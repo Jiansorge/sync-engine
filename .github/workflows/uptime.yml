@@ -105,3 +105,85 @@ jobs:
           else
             echo "open issue #$exists already exists"
           fi
+
+      # Close the issue once the site is healthy again. Without this the issue
+      # stays open forever, and the dedupe above then means a SECOND outage
+      # finds an existing issue, creates nothing, and sends no notification -
+      # the exact window when the alert is most needed goes silent. A closed
+      # issue on recovery is also what makes "open uptime issues" a signal a
+      # human can trust instead of a permanently-red line.
+      - name: Close the uptime issue on recovery
+        if: steps.health.outputs.ok == 'yes' && steps.ws.outputs.ws_ok == 'yes' && steps.contract.outputs.contract_ok != 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          exists=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label uptime --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "$exists" ]; then
+            gh issue close "$exists" --repo "$GITHUB_REPOSITORY" \
+              --comment "Recovered at $(date -u). All checks green: /health, /stats, WebSocket handshake, version contract. Closing so the next outage opens a fresh issue and notifies, instead of hiding behind this one." \
+              && echo "closed issue #$exists"
+          else
+            echo "no open uptime issue - nothing to close"
+          fi
+
+      # Optional second alert leg, active only if the ALERT_WEBHOOK_URL repo
+      # secret exists (ntfy.sh topic, Slack or Discord incoming webhook).
+      # Deliberately skip-not-fail when unset: a monitoring path that can break
+      # the check which found the outage is worse than having one alert channel.
+      - name: Alert the webhook if down (optional)
+        if: steps.health.outputs.ok == 'no' || steps.ws.outputs.ws_ok == 'no' || steps.contract.outputs.contract_ok == 'no'
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          # Same injection rule as the issue step: the remote /health body goes
+          # through the environment, never interpolated into run: script text.
+          HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
+          WS_OK: ${{ steps.ws.outputs.ws_ok }}
+          CONTRACT_OK: ${{ steps.contract.outputs.contract_ok }}
+        run: |
+          if [ -z "$ALERT_WEBHOOK_URL" ]; then
+            echo "ALERT_WEBHOOK_URL not set - skipping the webhook leg (the GitHub issue above is still opened)"
+            exit 0
+          fi
+          detail="$HEALTH_DETAIL"
+          if [ "$WS_OK" = "no" ]; then
+            if [ -n "$detail" ]; then detail="$detail; websocket smoke failed"; else detail="websocket smoke failed"; fi
+          fi
+          if [ "$CONTRACT_OK" = "no" ]; then
+            if [ -n "$detail" ]; then detail="$detail; live version violates Worker contract"; else detail="live version violates Worker contract"; fi
+          fi
+          msg="DOWN joining-palms.app $(date -u): $detail - see https://github.com/$GITHUB_REPOSITORY/actions"
+          # ntfy topic URLs take a plain-text body; Slack and Discord take JSON.
+          # Sending both `text` (Slack) and `content` (Discord) keys means one
+          # payload satisfies either, and the extra key is ignored by both.
+          case "$ALERT_WEBHOOK_URL" in
+            *ntfy.sh*)
+              if curl -sS --max-time 15 -d "$msg" "$ALERT_WEBHOOK_URL" >/dev/null; then
+                echo "ntfy alert sent"
+              else
+                echo "::warning::ntfy alert failed - the GitHub issue above is still open"
+              fi
+              ;;
+            *)
+              payload=$(jq -n --arg m "$msg" '{text: $m, content: $m}')
+              if curl -sS --max-time 15 -H 'Content-Type: application/json' -d "$payload" "$ALERT_WEBHOOK_URL" >/dev/null; then
+                echo "webhook alert sent"
+              else
+                echo "::warning::webhook alert failed - the GitHub issue above is still open"
+              fi
+              ;;
+          esac
+
+      # Tell the same channel the site is back, so a DOWN alert is never the
+      # last message someone sees. Best-effort and silent when unset.
+      - name: Notify the webhook on recovery (optional)
+        if: steps.health.outputs.ok == 'yes' && steps.ws.outputs.ws_ok == 'yes' && steps.contract.outputs.contract_ok != 'no'
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          if [ -z "$ALERT_WEBHOOK_URL" ]; then exit 0; fi
+          msg="UP joining-palms.app recovered at $(date -u) - all checks green"
+          case "$ALERT_WEBHOOK_URL" in
+            *ntfy.sh*) curl -sS --max-time 15 -d "$msg" "$ALERT_WEBHOOK_URL" >/dev/null || echo "::warning::ntfy recovery notice failed" ;;
+            *) curl -sS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg m "$msg" '{text: $m, content: $m}')" "$ALERT_WEBHOOK_URL" >/dev/null || echo "::warning::webhook recovery notice failed" ;;
+          esac
+          echo "recovery notice sent"
