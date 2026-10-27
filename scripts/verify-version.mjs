@@ -69,10 +69,19 @@ export function assertVersionContract(resources, expected) {
 
 // The contract wrangler.toml currently demands. Keep in sync with the config
 // drift tests in test/config.test.js.
-export function expectedContractFromToml(tomlPath = path.join(ROOT, 'wrangler.toml')) {
+//
+// `requiredBindings` is overridable because the staging Worker
+// (joining-palms-staging) intentionally omits the TOTALS_BACKUP KV: that
+// namespace is disaster recovery for production's lifetime totals, and
+// staging's world is disposable test data with nothing worth restoring. See
+// [env.staging] in wrangler.toml and TARGETS in scripts/deploy-app.mjs.
+export function expectedContractFromToml(
+  tomlPath = path.join(ROOT, 'wrangler.toml'),
+  { requiredBindings = TOML_REQUIRED_BINDINGS } = {}
+) {
   const raw = readFileSync(tomlPath, 'utf8')
   const compat = raw.match(/^\s*compatibility_date\s*=\s*"([^"]+)"/m)?.[1] ?? null
-  return { compatDate: compat, requiredBindings: [...TOML_REQUIRED_BINDINGS] }
+  return { compatDate: compat, requiredBindings: [...requiredBindings] }
 }
 
 export function scriptNameFromToml(tomlPath = path.join(ROOT, 'wrangler.toml')) {
@@ -216,7 +225,10 @@ export async function checkLiveVersionContract({
   script = scriptNameFromToml(),
   requireAuth = true,
   getVersion = liveVersionId,
-  getResources = fetchVersionResources
+  getResources = fetchVersionResources,
+  // Overridable so the staging Worker can be held to its own binding set (it
+  // has no TOTALS_BACKUP KV by design). Production keeps the default.
+  requiredBindings
 } = {}) {
   let credentials = await resolveCredentials({ requireAuth })
   if (!credentials.token) {
@@ -237,7 +249,7 @@ export async function checkLiveVersionContract({
     credentials = await resolveCredentials({ requireAuth })
     ;({ versionId, resources } = await loadVersion(credentials, script, getVersion, getResources))
   }
-  const expected = expectedContractFromToml()
+  const expected = expectedContractFromToml(path.join(ROOT, 'wrangler.toml'), { requiredBindings })
   const reasons = assertVersionContract(resources, expected)
   return { ok: reasons.length === 0, versionId, reasons, expected }
 }

@@ -21,6 +21,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "deploy:staging": "node scripts/deploy-app.mjs --env=staging",
+    "deploy:staging:dry": "node scripts/deploy-app.mjs --env=staging --dry-run",
     "deploy:app": "node scripts/deploy-app.mjs",
     "deploy:app:dry": "node scripts/deploy-app.mjs --dry-run",
     "ship": "node scripts/deploy-app.mjs",

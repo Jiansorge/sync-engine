@@ -1,7 +1,20 @@
 name: deploy
 
-# Ships the app + engine to joining-palms.app. Triggered automatically when the
-# prayer-earth CI passes (repository_dispatch), or manually from this repo.
+# Stage-first ship for the app + engine.
+#
+#   repository_dispatch (prayer-earth CI green on main)  →  STAGING, automatically.
+#   workflow_dispatch with target=production             →  production, deliberately.
+#   workflow_dispatch with target=staging                →  staging, by hand.
+#
+# Why: every green push used to auto-ship production. CI stops code that fails
+# its tests, but nothing stops code that passes tests and still breaks at
+# runtime — so a mid-development mistake reached real users on every push. Now a
+# push lands on staging.joining-palms.app (own Worker, own Durable Object
+# namespace, isolated storage), you verify it there, and production changes only
+# when you promote it. Production keeps the previous deploy's rollback safety
+# net either way.
+#
+# Promote: gh workflow run deploy --repo Jiansorge/sync-engine -f target=production
 #
 # Required repo secrets:
 #   DEPLOY_PAT            — a fine-grained PAT with Contents:read AND Statuses:write
@@ -11,15 +24,40 @@ name: deploy
 #                           is skipped with a warning and the deploy is unaffected.
 #   CLOUDFLARE_API_TOKEN  — Cloudflare token with Workers Scripts:Edit + Workers Routes:Edit + Zone:Cache Purge
 #   CLOUDFLARE_ACCOUNT_ID — the Cloudflare account id
+#   CF_API_TOKEN          — optional, SEPARATE zone-scoped token with Zone>Cache>Purge
+#                           (purge is a no-op on staging; production only).
 on:
   repository_dispatch:
     types: [deploy]
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Which environment to deploy"
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
 
 jobs:
   ship:
     runs-on: ubuntu-latest
     steps:
+      # A push dispatch always means staging. A manual run means whatever the
+      # operator chose. Computed once and passed through every later step so the
+      # deploy, the verify gate, the rollback path and the commit status can
+      # never disagree about which environment they are touching.
+      - name: Resolve the target environment
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "name=staging" >> "$GITHUB_OUTPUT"
+            echo "Deploying to staging (stage-first: production is promoted separately)"
+          else
+            echo "name=${{ inputs.target || 'staging' }}" >> "$GITHUB_OUTPUT"
+            echo "Deploying to ${{ inputs.target || 'staging' }}"
+          fi
+
       - name: Checkout sync-engine
         uses: actions/checkout@v7
         with:
@@ -59,15 +97,21 @@ jobs:
           TARGET_SHA: ${{ github.event.client_payload.sha }}
           TARGET_RUN_ID: ${{ github.event.client_payload.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPLOY_TARGET: ${{ steps.target.outputs.name }}
           # The ACCOUNT-scoped token, not CF_API_TOKEN. Naming the live version
           # means reading Workers deployments, which lives at account scope; the
           # zone-scoped token gets a 403 there and the status falls back to
-          # "production deployed" with no version in it.
+          # "staging deployed" with no version in it.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/report-deploy-status.mjs
 
-      - name: Ship (tests → build app → stage → deploy)
+      # The real work. --env=staging selects the [env.staging] Worker, its own
+      # Durable Object namespace and its reduced binding set (no TOTALS_BACKUP
+      # KV — staging's world is disposable). Omitting the flag deploys
+      # production, including its version-contract gate, rollback-on-failure and
+      # (production-only) edge-cache purge.
+      - name: Ship (tests → build app → stage → deploy → verify)
         id: ship
         working-directory: sync-engine
         env:
@@ -77,7 +121,7 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: node scripts/deploy-app.mjs --no-auth
+        run: node scripts/deploy-app.mjs --no-auth --env=${{ steps.target.outputs.name }}
 
       # Runs whether or not the ship step succeeded, because a failed deploy is
       # exactly the case this exists to surface. report-deploy-status.mjs exits 0
@@ -92,6 +136,7 @@ jobs:
           TARGET_RUN_ID: ${{ github.event.client_payload.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHIP_CONCLUSION: ${{ steps.ship.conclusion }}
+          DEPLOY_TARGET: ${{ steps.target.outputs.name }}
           # Account-scoped, for the same reason as above: the live version id
           # comes from the deployments endpoint, which the zone token cannot
           # read.

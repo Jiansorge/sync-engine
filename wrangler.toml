@@ -124,3 +124,68 @@ UPGRADE_WINDOW_MS = 60000
 # (prevents public fan-out amplification). Set via `npx wrangler secret put
 # ADMIN_KEY` — never put a real value here.
 # ADMIN_KEY = ""
+
+# ---------------------------------------------------------------------------
+# staging — `wrangler deploy --env staging` → staging.joining-palms.app
+#
+# Stage-first flow: every green push to prayer-earth main auto-deploys HERE,
+# and production only changes when you promote it deliberately (workflow
+# dispatch with target=production, or `npm run ship`). A broken mid-development
+# build therefore lands on staging, never on production.
+#
+# Everything below is redeclared because vars/durable_objects/kv_namespaces/
+# assets/routes/migrations are NON-INHERITABLE per environment in wrangler -
+# omitting one silently drops it, and dropping PROTOCOL_VERSION or
+# run_worker_first turns the post-deploy gates red (or worse, ships the SPA
+# fallback as the health endpoint). Each line is deliberate.
+#
+# ALLOWED_ORIGINS is the empty string, not absent. Staging serves the page and
+# accepts the WebSocket on the SAME host, so the worker's same-origin default
+# covers it ("" is falsy in shouldAllowUpgrade — see src/security.js), and
+# inheriting production's explicit allow-list would reject the staging origin
+# outright. Declaring it empty also silences wrangler's "vars are not inherited"
+# warning, which would otherwise fire on every single staging deploy — a warning
+# that always fires is one nobody reads.
+#
+# Deliberately absent: TOTALS_BACKUP. That KV is disaster recovery for
+# production's lifetime totals; staging's world is disposable test data, so
+# there is nothing there worth restoring. Binding production's namespace here
+# would be worse than the wrangler warning it leaves behind: staging's writes
+# would pollute the one backup production depends on. The version-contract
+# check is passed a reduced binding set for this target (scripts/deploy-app.mjs).
+#
+# Cache Rules (scripts/setup-cache-rules.mjs) are pinned to
+# `http.host eq "joining-palms.app"`, so they never match staging: the staging
+# shell is not edge-cached and needs no purge after a redeploy.
+[env.staging]
+name = "joining-palms-staging"
+
+[[env.staging.routes]]
+pattern = "staging.joining-palms.app"
+custom_domain = true
+
+[env.staging.durable_objects]
+bindings = [
+  { name = "SYNC_ROOM", class_name = "SyncRoom" },
+  { name = "COORDINATOR", class_name = "Coordinator" }
+]
+
+# A separate Worker, so its migration history starts at v1 independently of
+# production's. SQLite-backed, same classes.
+[[env.staging.migrations]]
+tag = "staging-v1"
+new_sqlite_classes = ["SyncRoom", "Coordinator"]
+
+[env.staging.assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/", "/health", "/stats"]
+
+[env.staging.vars]
+PROTOCOL_VERSION = 3
+HTTP_RATE_MAX = 60
+HTTP_RATE_WINDOW_MS = 10000
+MAX_UPGRADES_PER_IP = 10
+UPGRADE_WINDOW_MS = 60000
+# Empty (not unset): see the note above. Falsy → same-origin default applies.
+ALLOWED_ORIGINS = ""

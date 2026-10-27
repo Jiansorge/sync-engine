@@ -31,6 +31,47 @@ const skipBuild = flags.has('--skip-build')
 const stageOnly = flags.has('--stage-only') // build + stage + backup, no deploy
 const noAuth = flags.has('--no-auth') // bypass the Cloudflare login check (CI/testing)
 
+// Where this deploy goes, selected with --env=staging (wrangler's own flag
+// name, reused so there is one concept of "environment" across the repo).
+//
+// Stage-first by design: a green push to prayer-earth main deploys STAGING
+// (see .github/workflows/deploy.yml), and production only changes when you
+// promote it deliberately — workflow_dispatch with target=production, or
+// `npm run ship`, which defaults to production.
+const TARGETS = {
+  production: {
+    wranglerEnv: null, // top-level wrangler.toml config, no --env
+    base: 'https://joining-palms.app',
+    purge: true,
+    // requiredBindings intentionally unset: production is held to the full
+    // default set (ASSETS + both DOs + TOTALS_BACKUP) from expectedContractFromToml.
+  },
+  staging: {
+    wranglerEnv: 'staging',
+    base: 'https://staging.joining-palms.app',
+    // Staging omits the edge-cache purge because every Cache Rule is pinned to
+    // `http.host eq "joining-palms.app"` (scripts/setup-cache-rules.mjs), so
+    // staging's shell is never edge-cached and there is nothing to invalidate.
+    purge: false,
+    // Staging omits the TOTALS_BACKUP KV on purpose: that namespace is disaster
+    // recovery for production's lifetime totals, and staging's world is
+    // disposable test data with nothing worth restoring. See [env.staging].
+    requiredBindings: ['ASSETS', 'SYNC_ROOM', 'COORDINATOR'],
+  },
+}
+const targetName = (args.find((a) => a.startsWith('--env=')) || '').slice('--env='.length) || 'production'
+
+// The Worker script name for a target, read out of wrangler.toml so the config
+// stays the single source of truth rather than duplicating names here.
+function scriptNameFor(envName) {
+  const raw = readFileSync(path.join(ROOT, 'wrangler.toml'), 'utf8')
+  if (!envName) return raw.match(/^\s*name\s*=\s*"([^"]+)"/m)?.[1] ?? null
+  // The [env.X] section runs until the next table header, and `name` is its
+  // first key.
+  const section = raw.match(new RegExp(`^\\[env\\.${envName}\\][^\\[]*`, 'm'))?.[0] ?? ''
+  return section.match(/^\s*name\s*=\s*"([^"]+)"/m)?.[1] ?? null
+}
+
 function log(...a) {
   console.log('\n[deploy]', ...a)
 }
@@ -74,7 +115,22 @@ function restore(backupDir) {
 async function main() {
   if (flags.has('--restore')) return restore(args[args.indexOf('--restore') + 1])
 
-  log('Deploying Prayer Earth + sync-engine to Cloudflare Workers')
+  const target = TARGETS[targetName]
+  if (!target) fail(`unknown target "${targetName}"`, `expected one of: ${Object.keys(TARGETS).join(', ')}`)
+  const script = scriptNameFor(target.wranglerEnv)
+  if (!script) fail(`could not read the ${targetName} Worker name from wrangler.toml`)
+  // Contract options for THIS target: its script name, and its binding set
+  // (staging has no TOTALS_BACKUP KV by design).
+  const contract = {
+    script,
+    requireAuth: !noAuth,
+    ...(target.requiredBindings ? { requiredBindings: target.requiredBindings } : {}),
+  }
+  // Every wrangler call below must name the environment, or `--env staging`
+  // deploys would silently hit the top-level (production) config instead.
+  const envArgs = target.wranglerEnv ? ['--env', target.wranglerEnv] : []
+
+  log(`Deploying Prayer Earth + sync-engine to Cloudflare Workers → ${targetName} (${script})`)
 
   // 0. Preflight
   if (!noAuth) {
@@ -140,9 +196,12 @@ async function main() {
   writeFileSync(path.join(PUBLIC, '.gitkeep'), '')
   ok(`staged app build into public/ (${readdirSync(PUBLIC).length} entries)`)
 
-  // 4. Warn if the origin allow-list isn't pinned (production)
+  // 4. Warn if the origin allow-list isn't pinned (production only — staging
+  //    deliberately has none, because same-origin covers page + socket there)
   const wconfig = readFileSync(path.join(ROOT, 'wrangler.toml'), 'utf8')
-  if (!/^\s*ALLOWED_ORIGINS\s*=/m.test(wconfig)) {
+  if (target.wranglerEnv) {
+    log('Staging: ALLOWED_ORIGINS intentionally unset (same-origin default covers it).')
+  } else if (!/^\s*ALLOWED_ORIGINS\s*=/m.test(wconfig)) {
     log('NOTE: ALLOWED_ORIGINS is unset — the same-origin default applies.')
     log('      For a hardened multi-domain setup, set ALLOWED_ORIGINS in wrangler.toml.')
   }
@@ -158,7 +217,7 @@ async function main() {
   // version that was itself stripped is not a rollback, it is a second outage.
   let previousVersionId = null
   try {
-    const before = await checkLiveVersionContract({ requireAuth: !noAuth })
+    const before = await checkLiveVersionContract(contract)
     if (before.ok && before.versionId) {
       previousVersionId = before.versionId
       ok(`previous live version ${previousVersionId} recorded for rollback`)
@@ -180,13 +239,13 @@ async function main() {
   }
   if (dryRun) {
     log('Dry run — not deploying.')
-    run(npxCmd(), ['wrangler', 'deploy', '--dry-run'], { cwd: ROOT })
+    run(npxCmd(), ['wrangler', 'deploy', '--dry-run', ...envArgs], { cwd: ROOT })
     log('Done (dry). Rollback backup: ' + path.relative(ROOT, backup))
     return
   }
-  log('Deploying Worker…')
+  log(`Deploying Worker (${targetName})…`)
   try {
-    run(npmCmd, ['run', 'deploy'], { cwd: ROOT })
+    run(npxCmd(), ['wrangler', 'deploy', ...envArgs], { cwd: ROOT, env: process.env })
   } catch (err) {
     // A deploy that dies partway can still have replaced the live version, so this
     // is not just a "the upload never landed" case. Roll back first, then restore
@@ -195,8 +254,8 @@ async function main() {
     if (previousVersionId) {
       log(`Rolling the Worker back to ${previousVersionId}…`)
       try {
-        run(npxCmd(), ['wrangler', 'rollback', previousVersionId], { cwd: ROOT, env: process.env })
-        const after = await checkLiveVersionContract({ requireAuth: !noAuth })
+        run(npxCmd(), ['wrangler', 'rollback', previousVersionId, ...envArgs], { cwd: ROOT, env: process.env })
+        const after = await checkLiveVersionContract(contract)
         ok(after.ok
           ? `live version ${after.versionId} carries the full Worker contract again`
           : `rollback left version ${after.versionId} still violating the contract`)
@@ -222,7 +281,11 @@ async function main() {
   //    uptime regression. run_worker_first fixes routing; only a purge makes
   //    the edge actually give up the stale shell. Requires the separate
   //    Zone>Cache>Purge token (CF_API_TOKEN); skipped with a warning if unset.
-  if (process.env.CF_API_TOKEN) {
+  // Staging is exempt: its Cache Rules are host-pinned to joining-palms.app,
+  // so the staging shell is never edge-cached and a purge is a no-op there.
+  if (!target.purge) {
+    log('Skipping edge-cache purge (staging is not edge-cached).')
+  } else if (process.env.CF_API_TOKEN) {
     log('Purging edge cache for /, /health, /stats…')
     try {
       run(process.execPath, [path.join(ROOT, 'scripts', 'purge-cache.mjs'), '--paths=/ /health /stats'], { cwd: ROOT, env: process.env })
@@ -253,11 +316,11 @@ async function main() {
   //    routing) via scripts/verify-version.mjs — catching a config-stripped
   //    static-assets upload before its /health symptoms even start. A version
   //    that passes /health for days is still wrong if it is a Pages-style SPA.
-  log('Verifying live site…')
-  const base = (args.find((a) => a.startsWith('--url=')) || '--url=https://joining-palms.app').slice('--url='.length)
+  log(`Verifying live site (${targetName})…`)
+  const base = (args.find((a) => a.startsWith('--url=')) || `--url=${target.base}`).slice('--url='.length)
   let verifyFail = null
   try {
-    const version = await checkLiveVersionContract({ requireAuth: !noAuth })
+    const version = await checkLiveVersionContract(contract)
     if (!version.ok) {
       for (const reason of version.reasons) console.error(`[deploy]   ✗ version contract — ${reason}`)
       throw new Error(`live version ${version.versionId} violates the Worker contract`)
@@ -282,12 +345,12 @@ async function main() {
     if (previousVersionId) {
       log(`Rolling the Worker back to ${previousVersionId}…`)
       try {
-        run(npxCmd(), ['wrangler', 'rollback', previousVersionId], { cwd: ROOT, env: process.env })
+        run(npxCmd(), ['wrangler', 'rollback', previousVersionId, ...envArgs], { cwd: ROOT, env: process.env })
         ok(`rolled back to ${previousVersionId}`)
         // Confirm the rollback actually restored service rather than assuming it.
         // A rollback that silently fails is worse than no rollback, because it
         // converts a visible outage into an invisible one.
-        const after = await checkLiveVersionContract({ requireAuth: !noAuth })
+        const after = await checkLiveVersionContract(contract)
         if (after.ok) {
           ok(`live version ${after.versionId} carries the full Worker contract again`)
         } else {

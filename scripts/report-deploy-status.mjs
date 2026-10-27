@@ -26,6 +26,14 @@
 //   TARGET_RUN_ID       the prayer-earth run (used only to build a link)
 //   RUN_URL             this workflow run, used as the status target_url
 //   SHIP_CONCLUSION     '' | 'success' | 'failure' | ...; empty means "pending"
+//   DEPLOY_TARGET       'production' (default) | 'staging' — names the commit
+//                       status context (deploy/production vs deploy/staging) and
+//                       decides which Worker's live version is reported. A
+//                       staging deploy must never stamp a commit "production
+//                       deployed": under stage-first, production changes only
+//                       when you promote it.
+//   DEPLOY_SCRIPT       optional explicit Worker script name; defaults from
+//                       DEPLOY_TARGET.
 //   DEPLOY_PAT          PAT with Statuses:write on Jiansorge/prayer-earth
 //   CLOUDFLARE_*        optional; used only to name the live version on success
 
@@ -34,12 +42,19 @@ const {
   TARGET_RUN_ID,
   RUN_URL,
   SHIP_CONCLUSION = '',
+  DEPLOY_TARGET = 'production',
+  DEPLOY_SCRIPT,
   DEPLOY_PAT,
   CLOUDFLARE_API_TOKEN,
   CLOUDFLARE_ACCOUNT_ID,
 } = process.env
 
-const CONTEXT = 'deploy/production'
+// The commit status context is per-target, so a commit can show staging
+// deployed while production is still on the previous version — which is the
+// honest state under stage-first. Kept in one place because the context string
+// is what branch protection and the commit UI key off.
+const CONTEXT = `deploy/${DEPLOY_TARGET}`
+const SCRIPT = DEPLOY_SCRIPT || (DEPLOY_TARGET === 'staging' ? 'joining-palms-staging' : 'joining-palms')
 const MAX_DESCRIPTION = 140 // the API rejects anything longer
 
 const log = (m) => console.log(`[status] ${m}`)
@@ -64,7 +79,9 @@ async function liveVersionId() {
   if (!CLOUDFLARE_API_TOKEN || !CLOUDFLARE_ACCOUNT_ID) return null
   const url =
     'https://api.cloudflare.com/client/v4/accounts/' +
-    `${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/joining-palms/deployments?per_page=5`
+    // Per-target Worker: staging's live version must come from the staging
+    // script, or a staging deploy would name a production version id.
+    `${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${SCRIPT}/deployments?per_page=5`
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}` },
   })
@@ -87,9 +104,9 @@ async function liveVersionId() {
 }
 
 function describe() {
-  if (!SHIP_CONCLUSION) return 'deploying'
-  if (SHIP_CONCLUSION !== 'success') return 'deploy failed - see the run for why'
-  return 'production deployed'
+  if (!SHIP_CONCLUSION) return `deploying to ${DEPLOY_TARGET}`
+  if (SHIP_CONCLUSION !== 'success') return `${DEPLOY_TARGET} deploy failed - see the run for why`
+  return `${DEPLOY_TARGET} deployed`
 }
 
 const state = !SHIP_CONCLUSION ? 'pending' : SHIP_CONCLUSION === 'success' ? 'success' : 'failure'
