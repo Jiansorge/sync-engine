@@ -6,7 +6,12 @@
 //
 // It builds prayer-earth with VITE_SYNC_ENGINE=cf, stages dist/ into the
 // Worker's public/ (so the app and the sync socket share one origin), backs up
-// the previous public/, then `wrangler deploy`s and verifies /health.
+// the previous public/, then `wrangler deploy`s and verifies /health — plus a
+// headless-browser render of the LIVE site (prayer-earth's test-prod.mjs:
+// shell renders, deep links work, service worker registers, no page
+// exceptions), because /health answering says nothing about whether the page
+// actually draws. Skip that render with --skip-smoke (it is a gate: a failure
+// rolls back like any other verification failure).
 //
 // Rollback: `node scripts/deploy-app.mjs --restore <backup-dir>` then redeploy.
 
@@ -30,6 +35,7 @@ const skipTests = flags.has('--skip-tests')
 const skipBuild = flags.has('--skip-build')
 const stageOnly = flags.has('--stage-only') // build + stage + backup, no deploy
 const noAuth = flags.has('--no-auth') // bypass the Cloudflare login check (CI/testing)
+const skipSmoke = flags.has('--skip-smoke') // skip the post-deploy browser render gate
 
 // Where this deploy goes, selected with --env=staging (wrangler's own flag
 // name, reused so there is one concept of "environment" across the repo).
@@ -333,6 +339,31 @@ async function main() {
     }
     ok('Worker JSON on /health + /stats')
     ok('WebSocket smoke')
+
+    // The gates above prove the WORKER answers; none of them opens the page.
+    // A deploy can pass all three and still ship a shell that renders a blank
+    // screen (bad asset hash, JS that throws on boot, CSS that hides the
+    // root), and nothing else in this pipeline would notice — the tests ran
+    // against the PRE-deploy build, not the live site. This renders the live
+    // site in a real headless browser and asserts it actually works. Failure
+    // throws, so it rolls back exactly like a failed /health does. Escape
+    // hatch: --skip-smoke.
+    if (skipSmoke) {
+      log('Browser smoke skipped (--skip-smoke): the live shell was NOT rendered.')
+    } else {
+      log('Rendering the live site in a headless browser…')
+      // NOT the run() helper: run() exits the process on failure, which would
+      // abandon the rollback below and leave the broken version serving.
+      const smoke = spawnSync(process.execPath, [path.join(PE, 'scripts', 'test-prod.mjs')], {
+        cwd: PE,
+        env: { ...process.env, APP_URL: base },
+        stdio: 'inherit',
+        timeout: 180000, // the smoke waits on page loads; never hang a deploy on it
+      })
+      if (smoke.error) throw new Error(`browser smoke did not run: ${smoke.error.message}`)
+      if (smoke.status !== 0) throw new Error(`browser smoke failed against ${base} (exit ${smoke.status})`)
+      ok('browser smoke — live shell renders, deep links work, no page exceptions')
+    }
   } catch (err) {
     verifyFail = (err && err.message) || 'verify failed'
   }
