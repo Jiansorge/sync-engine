@@ -21,14 +21,26 @@ jobs:
       - name: Check /health and /stats
         id: health
         run: |
-          health_body=$(curl -s --max-time 15 https://joining-palms.app/health)
-          stats_body=$(curl -s --max-time 15 https://joining-palms.app/stats)
-          ok="no"
+          # curl's own transport failure (connection refused, DNS dead,
+          # timeout) must become DATA, not a dead step: GitHub runs run:
+          # steps under `bash -e`, and the unguarded `body=$(curl ...)`
+          # aborted there — so the most severe outages produced a red Actions
+          # run and NO issue, while the milder "200 with wrong body" case did
+          # alert. Capture the exit code and turn it into detail below.
+          hcode=0
+          health_body=$(curl -s --max-time 15 https://joining-palms.app/health) || hcode=$?
+          scode=0
+          stats_body=$(curl -s --max-time 15 https://joining-palms.app/stats) || scode=$?
+          # detail travels through GITHUB_OUTPUT: keep it single-line or the
+          # output file parse breaks on embedded newlines from an HTML body.
           detail=""
-          # jq fails on non-JSON (e.g. SPA HTML from the assets fallback) — which
-          # is precisely the Worker-vs-assets routing fault we guard against.
-          if echo "$health_body" | jq -e '.ok == true' >/dev/null 2>&1; then
-            if echo "$stats_body" | jq -e '(.errors // 0) == 0' >/dev/null 2>&1; then
+          ok="no"
+          if [ "$hcode" -ne 0 ]; then
+            detail="health unreachable (curl exit $hcode)"
+          elif echo "$health_body" | jq -e '.ok == true' >/dev/null 2>&1; then
+            if [ "$scode" -ne 0 ]; then
+              detail="stats unreachable (curl exit $scode)"
+            elif echo "$stats_body" | jq -e '(.errors // 0) == 0' >/dev/null 2>&1; then
               ok="yes"
             else
               detail="stats errors=$(echo "$stats_body" | jq -r '.errors // "bad-json"' 2>/dev/null)"
@@ -36,6 +48,7 @@ jobs:
           else
             detail="health not Worker JSON (assets fallback?) $(echo "$health_body" | head -c 120)"
           fi
+          detail=$(printf '%s' "$detail" | tr '\n' ' ')
           echo "ok=$ok"
           echo "detail=$detail"
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
@@ -61,7 +74,10 @@ jobs:
             echo "contract_ok=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          output=$(node scripts/verify-version.mjs 2>&1)
+          # `|| true`: a crashing verifier (bad node, missing secret handling)
+          # must not abort the step under `bash -e` — same rule as the health
+          # step: monitoring failures become issue text, never a dead run.
+          output=$(node scripts/verify-version.mjs 2>&1 || true)
           echo "$output"
           if echo "$output" | grep -q "contract OK"; then
             echo "contract_ok=yes" >> "$GITHUB_OUTPUT"
@@ -187,3 +203,108 @@ jobs:
             *) curl -sS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg m "$msg" '{text: $m, content: $m}')" "$ALERT_WEBHOOK_URL" >/dev/null || echo "::warning::webhook recovery notice failed" ;;
           esac
           echo "recovery notice sent"
+
+  # Quiet staging watch. Staging (staging.joining-palms.app) is disposable and
+  # re-deployed on every push, so this job is deliberately tamer than the
+  # production one:
+  #   - own `uptime-staging` label, so a staging hiccup never mixes into the
+  #     production uptime signal;
+  #   - no webhook leg — staging downtime must not page anyone (staging is
+  #     expected to be briefly broken; that is what staging is for);
+  #   - health + stats + WebSocket smoke only, no version-contract check
+  #     (the deploy gate already verifies the contract on every deploy, and a
+  #     contract secret here would just duplicate it on a 5-minute timer);
+  #   - never fails the workflow. Every check failure is converted into an
+  #     issue; the only red this job can show is its own infra breaking.
+  # Its value: a deploy that rolled back or a Worker left wedged between
+  # deploys is visible without anyone remembering to open the site.
+  check-staging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Check staging /health and /stats
+        id: health
+        run: |
+          # Same transport rule as the production job: under `bash -e` an
+          # unguarded curl failure kills the step before any issue is opened,
+          # so capture the exit code as data.
+          hcode=0
+          health_body=$(curl -s --max-time 15 https://staging.joining-palms.app/health) || hcode=$?
+          scode=0
+          stats_body=$(curl -s --max-time 15 https://staging.joining-palms.app/stats) || scode=$?
+          detail=""
+          ok="no"
+          if [ "$hcode" -ne 0 ]; then
+            detail="health unreachable (curl exit $hcode)"
+          elif echo "$health_body" | jq -e '.ok == true' >/dev/null 2>&1; then
+            if [ "$scode" -ne 0 ]; then
+              detail="stats unreachable (curl exit $scode)"
+            elif echo "$stats_body" | jq -e '(.errors // 0) == 0' >/dev/null 2>&1; then
+              ok="yes"
+            else
+              detail="stats errors=$(echo "$stats_body" | jq -r '.errors // "bad-json"' 2>/dev/null)"
+            fi
+          else
+            detail="health not Worker JSON (assets fallback?) $(echo "$health_body" | head -c 120)"
+          fi
+          detail=$(printf '%s' "$detail" | tr '\n' ' ')
+          echo "ok=$ok"
+          echo "detail=$detail"
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          echo "detail=$detail" >> "$GITHUB_OUTPUT"
+
+      - name: WebSocket smoke (staging upgrade must 101, not assets HTML)
+        id: ws
+        run: |
+          output=$(node scripts/smoke-ws.mjs wss://staging.joining-palms.app 2>&1 || true)
+          echo "$output"
+          ok="no"
+          if echo "$output" | grep -q "SMOKE OK"; then ok="yes"; fi
+          echo "ws_ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Open staging issue if down (deduped)
+        if: steps.health.outputs.ok == 'no' || steps.ws.outputs.ws_ok == 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Injection rule as everywhere else: the remote body travels via env.
+          HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
+          WS_OK: ${{ steps.ws.outputs.ws_ok }}
+        run: |
+          detail="$HEALTH_DETAIL"
+          if [ "$WS_OK" = "no" ]; then
+            if [ -n "$detail" ]; then detail="$detail; websocket smoke failed"; else detail="websocket smoke failed"; fi
+          fi
+          # Create the label defensively — `gh issue create --label` FAILS when
+          # the label is missing (that bug silently ate production alerts once).
+          gh label create uptime-staging --repo "$GITHUB_REPOSITORY" \
+            --color 1D76DB --description "Automated health-check failure for staging.joining-palms.app (quiet - staging only)" 2>/dev/null || true
+          exists=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label uptime-staging --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -z "$exists" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Uptime (staging): staging.joining-palms.app health check failing" \
+              --label uptime-staging \
+              --body "Staging check failed at $(date -u): $detail. Staging is disposable - check whether a deploy rolled back or the staging Worker is wedged: /health, /stats, WebSocket handshake, the latest deploy run. Production is unaffected unless it shows its own uptime issue." \
+              || echo "::warning::staging issue create failed (staging down, but no issue was opened)"
+          else
+            echo "open staging issue #$exists already exists"
+          fi
+
+      - name: Close the staging issue on recovery
+        if: steps.health.outputs.ok == 'yes' && steps.ws.outputs.ws_ok == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          exists=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label uptime-staging --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "$exists" ]; then
+            gh issue close "$exists" --repo "$GITHUB_REPOSITORY" \
+              --comment "Staging recovered at $(date -u): /health, /stats and WebSocket handshake all green. Closing so the next staging outage opens a fresh issue instead of hiding behind this one." \
+              && echo "closed staging issue #$exists" \
+              || echo "::warning::staging issue close failed"
+          else
+            echo "no open staging issue - nothing to close"
+          fi
